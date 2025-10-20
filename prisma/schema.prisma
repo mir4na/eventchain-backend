@@ -1,0 +1,121 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  EO
+  BUYER
+}
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum TransactionType {
+  PURCHASE
+  RESALE
+}
+
+model User {
+  id            Int       @id @default(autoincrement())
+  walletAddress String    @unique
+  role          UserRole  @default(BUYER)
+  name          String?
+  email         String?
+  isApproved    Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  proposals     Proposal[]
+  events        Event[]
+  tickets       Ticket[]
+
+  @@index([walletAddress])
+  @@index([role])
+}
+
+model Proposal {
+  id              Int            @id @default(autoincrement())
+  userId          Int
+  eventName       String
+  description     String         @db.Text
+  proposalFile    String?
+  status          ProposalStatus @default(PENDING)
+  rejectionReason String?        @db.Text
+  createdAt       DateTime       @default(now())
+  reviewedAt      DateTime?
+
+  user            User           @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([status])
+}
+
+model Event {
+  id                 Int       @id @default(autoincrement())
+  blockchainEventId  Int
+  creatorId          Int
+  eventName          String
+  eventURI           String
+  ticketPrice        String
+  totalTickets       Int
+  ticketsSold        Int       @default(0)
+  eventDate          DateTime
+  isActive           Boolean   @default(true)
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  creator            User      @relation(fields: [creatorId], references: [id])
+  tickets            Ticket[]
+  transactions       Transaction[]
+
+  @@unique([blockchainEventId])
+  @@index([creatorId])
+  @@index([isActive])
+}
+
+model Ticket {
+  id                  Int       @id @default(autoincrement())
+  blockchainTicketId  Int       @unique
+  eventId             Int
+  currentOwnerId      Int
+  currentOwner        String
+  isUsed              Boolean   @default(false)
+  isForResale         Boolean   @default(false)
+  resalePrice         String?
+  resaleDeadline      DateTime?
+  mintedAt            DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  event               Event     @relation(fields: [eventId], references: [id])
+  owner               User      @relation(fields: [currentOwnerId], references: [id])
+
+  @@index([eventId])
+  @@index([currentOwnerId])
+  @@index([isForResale])
+}
+
+model Transaction {
+  id            Int             @id @default(autoincrement())
+  txHash        String          @unique
+  eventId       Int
+  ticketId      Int?
+  buyerAddress  String
+  amount        String
+  type          TransactionType
+  createdAt     DateTime        @default(now())
+
+  event         Event           @relation(fields: [eventId], references: [id])
+
+  @@index([eventId])
+  @@index([buyerAddress])
+  @@index([createdAt])
+}
