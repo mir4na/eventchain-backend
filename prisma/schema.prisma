@@ -7,115 +7,187 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id        String   @id @default(cuid())
+  address   String   @unique
+  role      UserRole @default(BUYER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  events           Event[]
+  tickets          Ticket[]
+  transactions     Transaction[]
+  favorites        Favorite[]
+  walletHistories  WalletHistory[]
+
+  @@index([address])
+}
+
+model Event {
+  id              String      @id @default(cuid())
+  eventId         Int         @unique
+  eventCreator    String
+  eventName       String
+  eventURI        String
+  documentURI     String
+  description     String?
+  location        String?
+  eventDate       DateTime
+  eventActive     Boolean     @default(false)
+  status          EventStatus @default(PENDING)
+  createdAt       DateTime
+  approvedAt      DateTime?
+  txHash          String
+  blockNumber     Int?
+
+  creator         User         @relation(fields: [eventCreator], references: [address])
+  ticketTypes     TicketType[]
+  tickets         Ticket[]
+  revenueShares   RevenueShare[]
+  transactions    Transaction[]
+  favorites       Favorite[]
+
+  @@index([eventCreator])
+  @@index([status])
+  @@index([eventDate])
+}
+
+model TicketType {
+  id            String   @id @default(cuid())
+  typeId        Int
+  eventId       Int
+  typeName      String
+  description   String?
+  price         String
+  totalSupply   Int
+  sold          Int      @default(0)
+  saleStartTime DateTime
+  saleEndTime   DateTime
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  event   Event    @relation(fields: [eventId], references: [eventId])
+  tickets Ticket[]
+
+  @@unique([eventId, typeId])
+  @@index([eventId])
+}
+
+model Ticket {
+  id             String    @id @default(cuid())
+  ticketId       Int       @unique
+  eventId        Int
+  typeId         Int
+  currentOwner   String
+  isUsed         Boolean   @default(false)
+  mintedAt       DateTime
+  usedAt         DateTime?
+  isForResale    Boolean   @default(false)
+  resalePrice    String?
+  resaleDeadline DateTime?
+  resaleCount    Int       @default(0)
+  txHash         String
+
+  owner        User          @relation(fields: [currentOwner], references: [address])
+  event        Event         @relation(fields: [eventId], references: [eventId])
+  ticketType   TicketType    @relation(fields: [eventId, typeId], references: [eventId, typeId])
+  transactions Transaction[]
+
+  @@index([currentOwner])
+  @@index([eventId])
+  @@index([isForResale])
+}
+
+model RevenueShare {
+  id          String @id @default(cuid())
+  eventId     Int
+  beneficiary String
+  percentage  Int
+
+  event Event @relation(fields: [eventId], references: [eventId])
+
+  @@index([eventId])
+}
+
+model Transaction {
+  id          String          @id @default(cuid())
+  txHash      String          @unique
+  type        TransactionType
+  from        String
+  to          String?
+  eventId     Int?
+  ticketId    Int?
+  amount      String
+  status      TxStatus        @default(PENDING)
+  blockNumber Int?
+  timestamp   DateTime        @default(now())
+
+  user   User    @relation(fields: [from], references: [address])
+  event  Event?  @relation(fields: [eventId], references: [eventId])
+  ticket Ticket? @relation(fields: [ticketId], references: [ticketId])
+
+  @@index([from])
+  @@index([eventId])
+  @@index([type])
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  eventId   Int
+  createdAt DateTime @default(now())
+
+  user  User  @relation(fields: [userId], references: [id])
+  event Event @relation(fields: [eventId], references: [eventId])
+
+  @@unique([userId, eventId])
+  @@index([userId])
+}
+
+model WalletHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String
+  details   Json?
+  timestamp DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model Admin {
+  id        String   @id @default(cuid())
+  address   String   @unique
+  addedBy   String
+  addedAt   DateTime @default(now())
+  active    Boolean  @default(true)
+
+  @@index([address])
+}
+
 enum UserRole {
   ADMIN
   EO
   BUYER
 }
 
-enum ProposalStatus {
+enum EventStatus {
   PENDING
   APPROVED
   REJECTED
 }
 
 enum TransactionType {
-  PURCHASE
-  RESALE
+  TICKET_PURCHASE
+  TICKET_RESALE
+  EVENT_CREATION
+  TICKET_TYPE_ADDED
 }
 
-model User {
-  id            Int       @id @default(autoincrement())
-  walletAddress String    @unique
-  role          UserRole  @default(BUYER)
-  name          String?
-  email         String?
-  isApproved    Boolean   @default(false)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  proposals     Proposal[]
-  events        Event[]
-  tickets       Ticket[]
-
-  @@index([walletAddress])
-  @@index([role])
-}
-
-model Proposal {
-  id              Int            @id @default(autoincrement())
-  userId          Int
-  eventName       String
-  description     String         @db.Text
-  proposalFile    String?
-  status          ProposalStatus @default(PENDING)
-  rejectionReason String?        @db.Text
-  createdAt       DateTime       @default(now())
-  reviewedAt      DateTime?
-
-  user            User           @relation(fields: [userId], references: [id])
-
-  @@index([userId])
-  @@index([status])
-}
-
-model Event {
-  id                 Int       @id @default(autoincrement())
-  blockchainEventId  Int
-  creatorId          Int
-  eventName          String
-  eventURI           String
-  ticketPrice        String
-  totalTickets       Int
-  ticketsSold        Int       @default(0)
-  eventDate          DateTime
-  isActive           Boolean   @default(true)
-  createdAt          DateTime  @default(now())
-  updatedAt          DateTime  @updatedAt
-
-  creator            User      @relation(fields: [creatorId], references: [id])
-  tickets            Ticket[]
-  transactions       Transaction[]
-
-  @@unique([blockchainEventId])
-  @@index([creatorId])
-  @@index([isActive])
-}
-
-model Ticket {
-  id                  Int       @id @default(autoincrement())
-  blockchainTicketId  Int       @unique
-  eventId             Int
-  currentOwnerId      Int
-  currentOwner        String
-  isUsed              Boolean   @default(false)
-  isForResale         Boolean   @default(false)
-  resalePrice         String?
-  resaleDeadline      DateTime?
-  mintedAt            DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
-
-  event               Event     @relation(fields: [eventId], references: [id])
-  owner               User      @relation(fields: [currentOwnerId], references: [id])
-
-  @@index([eventId])
-  @@index([currentOwnerId])
-  @@index([isForResale])
-}
-
-model Transaction {
-  id            Int             @id @default(autoincrement())
-  txHash        String          @unique
-  eventId       Int
-  ticketId      Int?
-  buyerAddress  String
-  amount        String
-  type          TransactionType
-  createdAt     DateTime        @default(now())
-
-  event         Event           @relation(fields: [eventId], references: [id])
-
-  @@index([eventId])
-  @@index([buyerAddress])
-  @@index([createdAt])
+enum TxStatus {
+  PENDING
+  CONFIRMED
+  FAILED
 }

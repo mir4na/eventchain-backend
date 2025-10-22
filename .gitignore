@@ -3,3 +3,7 @@ node_modules/
 
 # Migration files
 prisma/migrations/
+
+.env
+errors.log
+combined.log
