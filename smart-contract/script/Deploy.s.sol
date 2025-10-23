@@ -3,23 +3,23 @@ pragma solidity ^0.8.30;
 
 import {Script} from "forge-std/Script.sol";
 import {console} from "forge-std/console.sol";
-import {EventTicketNFT} from "../contracts/EventTicketNFT.sol";
+import {EventTicketNFT} from "../EventTicketNFT.sol";
 
 contract DeployScript is Script {
     function run() public {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address deployer = vm.addr(deployerPrivateKey);
-
+        address platformWallet = vm.envAddress("PLATFORM_WALLET");
+        
         vm.startBroadcast(deployerPrivateKey);
 
-        EventTicketNFT eventTicketNFT = new EventTicketNFT();
+        EventTicketNFT nft = new EventTicketNFT(platformWallet);
+        
+        // Set the deployer as authorized minter
+        nft.setAuthorizedMinter(vm.addr(deployerPrivateKey), true);
 
-        address platformWallet = vm.envOr("PLATFORM_WALLET", deployer);
-        eventTicketNFT.setPlatformWallet(platformWallet);
+        console.log("EventTicketNFT deployed to:", address(nft));
+        console.log("Platform wallet:", platformWallet);
 
         vm.stopBroadcast();
-
-        console.log("EventTicketNFT deployed to:", address(eventTicketNFT));
-        console.log("Platform wallet set to:", platformWallet);
     }
 }
