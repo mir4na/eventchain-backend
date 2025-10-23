@@ -233,6 +233,280 @@ class TicketService {
     };
   }
 
+  async purchaseTickets(userAddress, eventId, typeId, quantity) {
+    // Check eligibility
+    const eligibility = await this.checkPurchaseEligibility(userAddress, eventId, quantity);
+    if (!eligibility.canPurchase) {
+      throw new Error('Purchase limit exceeded');
+    }
+
+    // Get ticket type details
+    const ticketType = await prisma.ticketType.findUnique({
+      where: {
+        eventId_typeId: {
+          eventId: parseInt(eventId),
+          typeId: parseInt(typeId)
+        }
+      }
+    });
+
+    if (!ticketType) {
+      throw new Error('Ticket type not found');
+    }
+
+    if (ticketType.sold + quantity > ticketType.totalSupply) {
+      throw new Error('Not enough tickets available');
+    }
+
+    const now = new Date();
+    if (now < ticketType.saleStartTime) {
+      throw new Error('Sale has not started yet');
+    }
+
+    if (now > ticketType.saleEndTime) {
+      throw new Error('Sale has ended');
+    }
+
+    // Mint tickets on blockchain
+    const tickets = [];
+    for (let i = 0; i < quantity; i++) {
+      const result = await blockchainService.mintTicket(
+        userAddress,
+        parseInt(eventId),
+        parseInt(typeId),
+        ticketType.price
+      );
+
+      // Save to database
+      const ticket = await prisma.ticket.create({
+        data: {
+          ticketId: parseInt(result.ticketId),
+          eventId: parseInt(eventId),
+          typeId: parseInt(typeId),
+          currentOwner: userAddress,
+          mintedAt: new Date(),
+          txHash: result.txHash
+        }
+      });
+
+      tickets.push(ticket);
+
+      // Record transaction
+      await prisma.transaction.create({
+        data: {
+          txHash: result.txHash,
+          type: 'TICKET_PURCHASE',
+          from: '0x0000000000000000000000000000000000000000', // System
+          to: userAddress,
+          eventId: parseInt(eventId),
+          ticketId: parseInt(result.ticketId),
+          amount: ticketType.price,
+          status: 'CONFIRMED',
+          blockNumber: result.blockNumber
+        }
+      });
+    }
+
+    // Update sold count
+    await prisma.ticketType.update({
+      where: {
+        eventId_typeId: {
+          eventId: parseInt(eventId),
+          typeId: parseInt(typeId)
+        }
+      },
+      data: {
+        sold: ticketType.sold + quantity
+      }
+    });
+
+    return tickets.map(ticket => this.formatTicketResponse(ticket));
+  }
+
+  async listTicketForResale(ticketId, resalePrice, resaleDeadline, userAddress) {
+    const ticket = await prisma.ticket.findUnique({
+      where: { ticketId: parseInt(ticketId) },
+      include: { ticketType: true }
+    });
+
+    if (!ticket) {
+      throw new Error('Ticket not found');
+    }
+
+    if (ticket.currentOwner !== userAddress) {
+      throw new Error('Not ticket owner');
+    }
+
+    if (ticket.isUsed) {
+      throw new Error('Ticket already used');
+    }
+
+    if (ticket.isForResale) {
+      throw new Error('Ticket already listed for resale');
+    }
+
+    if (ticket.resaleCount >= 1) {
+      throw new Error('Ticket cannot be resold');
+    }
+
+    const maxPrice = (BigInt(ticket.ticketType.price) * BigInt(120) / BigInt(100)).toString();
+    if (BigInt(resalePrice) > BigInt(maxPrice)) {
+      throw new Error('Resale price exceeds maximum allowed');
+    }
+
+    // List on blockchain
+    const result = await blockchainService.listForResale(
+      ticketId,
+      resalePrice,
+      new Date(resaleDeadline)
+    );
+
+    // Update database
+    await prisma.ticket.update({
+      where: { ticketId: parseInt(ticketId) },
+      data: {
+        isForResale: true,
+        resalePrice: resalePrice,
+        resaleDeadline: new Date(resaleDeadline)
+      }
+    });
+
+    return {
+      ticketId: parseInt(ticketId),
+      resalePrice,
+      resaleDeadline: new Date(resaleDeadline),
+      txHash: result.txHash
+    };
+  }
+
+  async buyResaleTicket(ticketId, buyerAddress) {
+    const ticket = await prisma.ticket.findUnique({
+      where: { ticketId: parseInt(ticketId) },
+      include: { ticketType: true }
+    });
+
+    if (!ticket) {
+      throw new Error('Ticket not found');
+    }
+
+    if (!ticket.isForResale) {
+      throw new Error('Ticket not for resale');
+    }
+
+    if (new Date() > ticket.resaleDeadline) {
+      throw new Error('Resale deadline passed');
+    }
+
+    // Buy on blockchain
+    const result = await blockchainService.buyResaleTicket(ticketId, ticket.resalePrice);
+
+    // Update database
+    await prisma.ticket.update({
+      where: { ticketId: parseInt(ticketId) },
+      data: {
+        currentOwner: buyerAddress,
+        isForResale: false,
+        resalePrice: null,
+        resaleDeadline: null,
+        resaleCount: ticket.resaleCount + 1
+      }
+    });
+
+    // Record transaction
+    await prisma.transaction.create({
+      data: {
+        txHash: result.txHash,
+        type: 'TICKET_RESALE',
+        from: ticket.currentOwner,
+        to: buyerAddress,
+        eventId: ticket.eventId,
+        ticketId: parseInt(ticketId),
+        amount: ticket.resalePrice,
+        status: 'CONFIRMED',
+        blockNumber: result.blockNumber
+      }
+    });
+
+    return {
+      ticketId: parseInt(ticketId),
+      newOwner: buyerAddress,
+      txHash: result.txHash
+    };
+  }
+
+  async cancelResaleListing(ticketId, userAddress) {
+    const ticket = await prisma.ticket.findUnique({
+      where: { ticketId: parseInt(ticketId) }
+    });
+
+    if (!ticket) {
+      throw new Error('Ticket not found');
+    }
+
+    if (ticket.currentOwner !== userAddress) {
+      throw new Error('Not ticket owner');
+    }
+
+    if (!ticket.isForResale) {
+      throw new Error('Ticket not listed for resale');
+    }
+
+    // Cancel on blockchain
+    const result = await blockchainService.cancelResaleListing(ticketId);
+
+    // Update database
+    await prisma.ticket.update({
+      where: { ticketId: parseInt(ticketId) },
+      data: {
+        isForResale: false,
+        resalePrice: null,
+        resaleDeadline: null
+      }
+    });
+
+    return {
+      ticketId: parseInt(ticketId),
+      txHash: result.txHash
+    };
+  }
+
+  async useTicket(ticketId, eventId) {
+    const ticket = await prisma.ticket.findUnique({
+      where: { ticketId: parseInt(ticketId) }
+    });
+
+    if (!ticket) {
+      throw new Error('Ticket not found');
+    }
+
+    if (ticket.eventId !== parseInt(eventId)) {
+      throw new Error('Ticket does not belong to this event');
+    }
+
+    if (ticket.isUsed) {
+      throw new Error('Ticket already used');
+    }
+
+    // Use on blockchain
+    const result = await blockchainService.useTicket(ticketId);
+
+    // Update database
+    await prisma.ticket.update({
+      where: { ticketId: parseInt(ticketId) },
+      data: {
+        isUsed: true,
+        usedAt: new Date()
+      }
+    });
+
+    return {
+      ticketId: parseInt(ticketId),
+      isUsed: true,
+      usedAt: new Date(),
+      txHash: result.txHash
+    };
+  }
+
   formatTicketResponse(ticket) {
     const canResell = ticket.resaleCount < 1 && !ticket.isUsed;
     const maxResalePrice = canResell 

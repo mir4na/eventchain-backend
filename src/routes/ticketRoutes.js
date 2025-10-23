@@ -1,13 +1,30 @@
 const express = require('express');
+const { authenticateUser, requireRole } = require('../middleware/auth');
+const {
+  getUserTickets,
+  getTicketById,
+  listForResale,
+  buyResaleTicket,
+  cancelResaleListing,
+  getResaleTickets,
+  useTicket,
+  getTicketHistory
+} = require('../controllers/ticketController');
+
 const router = express.Router();
-const ticketController = require('../controllers/ticketController');
 
-router.get('/user/:address', ticketController.getUserTickets);
-router.get('/resale', ticketController.getResaleTickets);
-router.get('/:ticketId', ticketController.getTicketById);
-router.get('/:ticketId/history', ticketController.getTicketTransactionHistory);
+// Public routes
+router.get('/resale', getResaleTickets);
+router.get('/:id', getTicketById);
+router.get('/:id/history', getTicketHistory);
 
-router.get('/availability/:eventId/:typeId', ticketController.getTicketTypeAvailability);
-router.get('/eligibility/:address/:eventId', ticketController.checkPurchaseEligibility);
+// Protected routes
+router.get('/user/:address', getUserTickets);
+router.post('/resale/list', authenticateUser, listForResale);
+router.post('/resale/buy', authenticateUser, buyResaleTicket);
+router.delete('/resale/:ticketId', authenticateUser, cancelResaleListing);
+
+// EO routes (for ticket usage)
+router.post('/:ticketId/use', authenticateUser, requireRole(['EO']), useTicket);
 
 module.exports = router;

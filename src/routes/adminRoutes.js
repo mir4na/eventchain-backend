@@ -1,17 +1,31 @@
 const express = require('express');
+const { authenticateUser, requireRole } = require('../middleware/auth');
+const {
+  approveEvent,
+  rejectEvent,
+  getPendingEvents,
+  getAdminStats,
+  addAdmin,
+  removeAdmin,
+  getAdmins
+} = require('../controllers/adminController');
+
 const router = express.Router();
-const adminController = require('../controllers/adminController');
-const { auth } = require('../middleware/auth');
-const { validateAdmin } = require('../middleware/validation');
 
-router.post('/add', auth, validateAdmin, adminController.addAdmin);
-router.post('/remove', auth, validateAdmin, adminController.removeAdmin);
+// All admin routes require admin role
+router.use(authenticateUser, requireRole(['ADMIN']));
 
-router.post('/events/:eventId/approve', auth, validateAdmin, adminController.approveEvent);
-router.post('/events/:eventId/reject', auth, validateAdmin, adminController.rejectEvent);
+// Event management
+router.get('/events/pending', getPendingEvents);
+router.post('/events/:eventId/approve', approveEvent);
+router.post('/events/:eventId/reject', rejectEvent);
 
-router.get('/stats', auth, validateAdmin, adminController.getAdminStats);
-router.get('/events/pending', auth, validateAdmin, adminController.getPendingEvents);
-router.get('/verify/:address', auth, validateAdmin, adminController.verifyAdmin);
+// Statistics
+router.get('/stats', getAdminStats);
+
+// Admin management
+router.get('/admins', getAdmins);
+router.post('/admins', addAdmin);
+router.delete('/admins/:adminAddress', removeAdmin);
 
 module.exports = router;
