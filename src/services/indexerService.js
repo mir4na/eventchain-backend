@@ -1,6 +1,18 @@
-const { contract, provider } = require('../config/blockchain');
+const { ethers } = require('ethers');
 const prisma = require('../config/database');
 const logger = require('../utils/logger');
+
+const EventChainABI = [
+  "event PlatformWalletUpdated(address indexed newWallet)",
+  "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
+  "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
+  "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
+  "event TicketListedForResale(uint256 indexed ticketId, uint256 indexed eventId, address indexed seller, uint256 resalePrice, uint256 deadline)",
+  "event TicketResold(uint256 indexed ticketId, uint256 indexed eventId, address indexed from, address to, uint256 price, uint256 taxAmount)",
+  "event ResaleListingCancelled(uint256 indexed ticketId, address indexed seller)",
+  "event TicketUsed(uint256 indexed ticketId, uint256 indexed eventId, address indexed user, uint256 timestamp)",
+  "event RevenueDistributed(uint256 indexed eventId, uint256 totalAmount, uint256 taxAmount, uint256 netAmount, uint256 timestamp)"
+];
 
 class IndexerService {
   constructor() {
@@ -10,6 +22,13 @@ class IndexerService {
     this.RETRY_DELAY = 2000;
     this.MAX_RETRIES = 3;
     this.REQUEST_DELAY = 500;
+    
+    this.provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    this.contract = new ethers.Contract(
+      process.env.CONTRACT_ADDRESS,
+      EventChainABI,
+      this.provider
+    );
   }
 
   async start() {
@@ -63,20 +82,18 @@ class IndexerService {
 
   async indexPastEvents() {
     try {
-      const currentBlock = await this.retryWithBackoff(() => provider.getBlockNumber());
+      const currentBlock = await this.retryWithBackoff(() => this.provider.getBlockNumber());
       logger.info(`Indexing from block ${this.lastProcessedBlock} to ${currentBlock}`);
 
       const events = [
-        'EventCreated',
-        'EventApproved',
-        'EventRejected',
-        'TicketTypeAdded',
-        'TicketTypeUpdated',
+        'RevenueConfigured',
         'TicketMinted',
         'TicketsPurchased',
         'TicketListedForResale',
         'TicketResold',
-        'TicketUsed'
+        'ResaleListingCancelled',
+        'TicketUsed',
+        'RevenueDistributed'
       ];
 
       for (const eventName of events) {
@@ -101,8 +118,8 @@ class IndexerService {
       
       try {
         await this.retryWithBackoff(async () => {
-          const filter = contract.filters[eventName]();
-          const logs = await contract.queryFilter(filter, currentFrom, currentTo);
+          const filter = this.contract.filters[eventName]();
+          const logs = await this.contract.queryFilter(filter, currentFrom, currentTo);
           
           for (const log of logs) {
             await this.processEvent(eventName, log);
@@ -122,20 +139,18 @@ class IndexerService {
 
   startRealTimeIndexing() {
     const events = [
-      'EventCreated',
-      'EventApproved',
-      'EventRejected',
-      'TicketTypeAdded',
-      'TicketTypeUpdated',
+      'RevenueConfigured',
       'TicketMinted',
       'TicketsPurchased',
       'TicketListedForResale',
       'TicketResold',
-      'TicketUsed'
+      'ResaleListingCancelled',
+      'TicketUsed',
+      'RevenueDistributed'
     ];
 
     events.forEach(eventName => {
-      contract.on(eventName, async (...args) => {
+      this.contract.on(eventName, async (...args) => {
         const event = args[args.length - 1];
         try {
           await this.retryWithBackoff(() => this.processEvent(eventName, event));
@@ -153,20 +168,8 @@ class IndexerService {
       const block = await this.retryWithBackoff(() => log.getBlock());
       
       switch (eventName) {
-        case 'EventCreated':
-          await this.handleEventCreated(log, block);
-          break;
-        case 'EventApproved':
-          await this.handleEventApproved(log, block);
-          break;
-        case 'EventRejected':
-          await this.handleEventRejected(log, block);
-          break;
-        case 'TicketTypeAdded':
-          await this.handleTicketTypeAdded(log, block);
-          break;
-        case 'TicketTypeUpdated':
-          await this.handleTicketTypeUpdated(log, block);
+        case 'RevenueConfigured':
+          await this.handleRevenueConfigured(log, block);
           break;
         case 'TicketMinted':
           await this.handleTicketMinted(log, block);
@@ -180,8 +183,14 @@ class IndexerService {
         case 'TicketResold':
           await this.handleTicketResold(log, block);
           break;
+        case 'ResaleListingCancelled':
+          await this.handleResaleListingCancelled(log, block);
+          break;
         case 'TicketUsed':
           await this.handleTicketUsed(log, block);
+          break;
+        case 'RevenueDistributed':
+          await this.handleRevenueDistributed(log, block);
           break;
       }
 
@@ -191,199 +200,72 @@ class IndexerService {
     }
   }
 
-  async handleEventCreated(log, block) {
-    const [eventId, creator, eventName] = log.args;
+  async handleRevenueConfigured(log, block) {
+    const [eventId, creator, taxWallet] = log.args;
     
-    await prisma.user.upsert({
-      where: { address: creator },
-      create: { address: creator, role: 'EO' },
-      update: {}
-    });
-
-    const eventDetails = await this.retryWithBackoff(() => 
-      contract.getEventDetails(Number(eventId))
-    );
-
-    await prisma.event.create({
-      data: {
-        eventId: Number(eventId),
-        eventCreator: creator,
-        eventName: eventName,
-        eventURI: eventDetails.eventURI,
-        documentURI: eventDetails.documentURI,
-        eventDate: new Date(Number(eventDetails.eventDate) * 1000),
-        eventActive: eventDetails.eventActive,
-        status: ['PENDING', 'APPROVED', 'REJECTED'][Number(eventDetails.status)],
-        createdAt: new Date(Number(eventDetails.createdAt) * 1000),
-        txHash: log.transactionHash,
-        blockNumber: block.number
-      }
-    });
-
-    const revenueShares = await this.retryWithBackoff(() => 
-      contract.getRevenueShares(Number(eventId))
-    );
-    
-    for (const share of revenueShares) {
-      await prisma.revenueShare.create({
-        data: {
-          eventId: Number(eventId),
-          beneficiary: share.beneficiary,
-          percentage: Number(share.percentage)
-        }
-      });
-    }
-
-    await prisma.transaction.create({
-      data: {
-        txHash: log.transactionHash,
-        type: 'EVENT_CREATION',
-        from: creator,
-        eventId: Number(eventId),
-        amount: '0',
-        status: 'CONFIRMED',
-        blockNumber: block.number,
-        timestamp: new Date(block.timestamp * 1000)
-      }
-    });
-  }
-
-  async handleEventApproved(log, block) {
-    const [eventId, creator] = log.args;
-
-    await prisma.event.update({
-      where: { eventId: Number(eventId) },
-      data: {
-        status: 'APPROVED',
-        approvedAt: new Date(block.timestamp * 1000)
-      }
-    });
-  }
-
-  async handleEventRejected(log, block) {
-    const [eventId, creator] = log.args;
-
-    await prisma.event.update({
-      where: { eventId: Number(eventId) },
-      data: { status: 'REJECTED' }
-    });
-  }
-
-  async handleTicketTypeAdded(log, block) {
-    const [eventId, typeId, typeName, price, supply] = log.args;
-    
-    const ticketType = await this.retryWithBackoff(() => 
-      contract.getTicketType(Number(eventId), Number(typeId))
-    );
-
-    await prisma.ticketType.create({
-      data: {
-        typeId: Number(typeId),
-        eventId: Number(eventId),
-        typeName: typeName,
-        price: price.toString(),
-        totalSupply: Number(supply),
-        sold: Number(ticketType.sold),
-        saleStartTime: new Date(Number(ticketType.saleStartTime) * 1000),
-        saleEndTime: new Date(Number(ticketType.saleEndTime) * 1000),
-        active: ticketType.active
-      }
-    });
-
-    await prisma.event.update({
-      where: { eventId: Number(eventId) },
-      data: { eventActive: true }
-    });
-
-    const tx = await this.retryWithBackoff(() => log.getTransaction());
-
-    await prisma.transaction.create({
-      data: {
-        txHash: log.transactionHash,
-        type: 'TICKET_TYPE_ADDED',
-        from: tx.from,
-        eventId: Number(eventId),
-        amount: '0',
-        status: 'CONFIRMED',
-        blockNumber: block.number,
-        timestamp: new Date(block.timestamp * 1000)
-      }
-    });
-  }
-
-  async handleTicketTypeUpdated(log, block) {
-    const [eventId, typeId, price, supply] = log.args;
-    
-    const ticketType = await this.retryWithBackoff(() => 
-      contract.getTicketType(Number(eventId), Number(typeId))
-    );
-
-    await prisma.ticketType.update({
-      where: {
-        eventId_typeId: {
-          eventId: Number(eventId),
-          typeId: Number(typeId)
-        }
-      },
-      data: {
-        price: price.toString(),
-        totalSupply: Number(supply),
-        saleStartTime: new Date(Number(ticketType.saleStartTime) * 1000),
-        saleEndTime: new Date(Number(ticketType.saleEndTime) * 1000),
-        active: ticketType.active
-      }
-    });
+    logger.info(`Revenue configured for event ${eventId}`);
   }
 
   async handleTicketMinted(log, block) {
-    const [ticketId, eventId, typeId, buyer] = log.args;
+    const [ticketId, eventId, typeId, buyer, price] = log.args;
 
     await prisma.user.upsert({
-      where: { address: buyer },
-      create: { address: buyer, role: 'BUYER' },
+      where: { walletAddress: buyer },
+      create: { walletAddress: buyer, role: 'USER' },
       update: {}
     });
-
-    const ticketDetails = await this.retryWithBackoff(() => 
-      contract.getTicketDetails(Number(ticketId))
-    );
 
     await prisma.ticket.create({
       data: {
         ticketId: Number(ticketId),
-        eventId: Number(eventId),
-        typeId: Number(typeId),
-        currentOwner: buyer,
-        isUsed: false,
-        mintedAt: new Date(Number(ticketDetails.mintedAt) * 1000),
-        txHash: log.transactionHash
+        eventId: String(eventId),
+        typeId: String(typeId),
+        ownerId: buyer,
+        txHash: log.transactionHash,
+        blockNumber: block.number,
+        originalPrice: price.toString(),
+        mintedAt: new Date(block.timestamp * 1000),
+        qrCode: `ticket-${ticketId}-${eventId}`
       }
     });
   }
 
   async handleTicketsPurchased(log, block) {
-    const [eventId, typeId, buyer, quantity, totalCost] = log.args;
+    const [eventId, typeId, buyer, quantity, totalCost, taxAmount, ticketIds] = log.args;
 
-    await prisma.ticketType.update({
+    const event = await prisma.event.findFirst({
+      where: { eventId: Number(eventId) }
+    });
+
+    if (!event) {
+      logger.warn(`Event ${eventId} not found in database`);
+      return;
+    }
+
+    await prisma.ticketType.updateMany({
       where: {
-        eventId_typeId: {
-          eventId: Number(eventId),
-          typeId: Number(typeId)
-        }
+        eventId: event.id,
+        typeId: Number(typeId)
       },
       data: {
         sold: { increment: Number(quantity) }
       }
     });
 
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: buyer }
+    });
+
     await prisma.transaction.create({
       data: {
         txHash: log.transactionHash,
-        type: 'TICKET_PURCHASE',
+        userId: user.id,
+        type: 'PURCHASE',
         from: buyer,
-        eventId: Number(eventId),
+        to: process.env.CONTRACT_ADDRESS,
         amount: totalCost.toString(),
-        status: 'CONFIRMED',
+        eventId: event.id,
+        ticketIds: ticketIds.map(id => Number(id)),
         blockNumber: block.number,
         timestamp: new Date(block.timestamp * 1000)
       }
@@ -391,9 +273,9 @@ class IndexerService {
   }
 
   async handleTicketListedForResale(log, block) {
-    const [ticketId, resalePrice, deadline] = log.args;
+    const [ticketId, eventId, seller, resalePrice, deadline] = log.args;
 
-    await prisma.ticket.update({
+    await prisma.ticket.updateMany({
       where: { ticketId: Number(ticketId) },
       data: {
         isForResale: true,
@@ -404,18 +286,22 @@ class IndexerService {
   }
 
   async handleTicketResold(log, block) {
-    const [ticketId, from, to, price] = log.args;
+    const [ticketId, eventId, from, to, price, taxAmount] = log.args;
 
     await prisma.user.upsert({
-      where: { address: to },
-      create: { address: to, role: 'BUYER' },
+      where: { walletAddress: to },
+      create: { walletAddress: to, role: 'USER' },
       update: {}
     });
 
-    await prisma.ticket.update({
+    const newOwner = await prisma.user.findUnique({
+      where: { walletAddress: to }
+    });
+
+    await prisma.ticket.updateMany({
       where: { ticketId: Number(ticketId) },
       data: {
-        currentOwner: to,
+        ownerId: newOwner.id,
         isForResale: false,
         resalePrice: null,
         resaleDeadline: null,
@@ -423,36 +309,84 @@ class IndexerService {
       }
     });
 
+    const fromUser = await prisma.user.findUnique({
+      where: { walletAddress: from }
+    });
+
+    const ticket = await prisma.ticket.findFirst({
+      where: { ticketId: Number(ticketId) }
+    });
+
     await prisma.transaction.create({
       data: {
         txHash: log.transactionHash,
-        type: 'TICKET_RESALE',
+        userId: newOwner.id,
+        type: 'RESALE_BUY',
         from: from,
         to: to,
-        ticketId: Number(ticketId),
         amount: price.toString(),
-        status: 'CONFIRMED',
+        eventId: ticket.eventId,
+        ticketIds: [Number(ticketId)],
         blockNumber: block.number,
         timestamp: new Date(block.timestamp * 1000)
       }
     });
   }
 
-  async handleTicketUsed(log, block) {
-    const [ticketId, eventId, user] = log.args;
+  async handleResaleListingCancelled(log, block) {
+    const [ticketId, seller] = log.args;
 
-    await prisma.ticket.update({
+    await prisma.ticket.updateMany({
       where: { ticketId: Number(ticketId) },
       data: {
-        isUsed: true,
-        usedAt: new Date(block.timestamp * 1000)
+        isForResale: false,
+        resalePrice: null,
+        resaleDeadline: null
       }
     });
   }
 
+  async handleTicketUsed(log, block) {
+    const [ticketId, eventId, user, timestamp] = log.args;
+
+    await prisma.ticket.updateMany({
+      where: { ticketId: Number(ticketId) },
+      data: {
+        isUsed: true,
+        usedAt: new Date(Number(timestamp) * 1000)
+      }
+    });
+
+    const ticket = await prisma.ticket.findFirst({
+      where: { ticketId: Number(ticketId) },
+      include: { owner: true }
+    });
+
+    await prisma.transaction.create({
+      data: {
+        txHash: log.transactionHash,
+        userId: ticket.owner.id,
+        type: 'USE',
+        from: user,
+        to: process.env.CONTRACT_ADDRESS,
+        amount: '0',
+        eventId: ticket.eventId,
+        ticketIds: [Number(ticketId)],
+        blockNumber: block.number,
+        timestamp: new Date(block.timestamp * 1000)
+      }
+    });
+  }
+
+  async handleRevenueDistributed(log, block) {
+    const [eventId, totalAmount, taxAmount, netAmount, timestamp] = log.args;
+    
+    logger.info(`Revenue distributed for event ${eventId}: ${totalAmount}`);
+  }
+
   stop() {
     this.isRunning = false;
-    contract.removeAllListeners();
+    this.contract.removeAllListeners();
     logger.info('Indexer stopped');
   }
 }

@@ -1,0 +1,3418 @@
+schema.prisma
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model User {
+  id            String   @id @default(uuid())
+  walletAddress String   @unique
+  role          Role     @default(USER)
+  name          String?
+  email         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  events        Event[]
+  tickets       Ticket[]
+  proposals     Proposal[]
+  transactions  Transaction[]
+  favorites     Favorite[]
+  walletHistory WalletHistory[]
+}
+
+enum Role {
+  ADMIN
+  EO
+  USER
+}
+
+model WalletHistory {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String
+  details   Json
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Admin {
+  id        String   @id @default(uuid())
+  address   String   @unique
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Event {
+  id          String      @id @default(uuid())
+  eventId     Int         @unique @default(autoincrement())
+  name        String
+  description String
+  location    String
+  date        DateTime
+  posterUrl   String?
+  status      EventStatus @default(PENDING)
+  
+  creatorId   String
+  creator     User        @relation(fields: [creatorId], references: [id])
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  ticketTypes TicketType[]
+  proposals   Proposal[]
+  tickets     Ticket[]
+  favorites   Favorite[]
+  transactions Transaction[]
+  
+  @@index([creatorId])
+  @@index([status])
+  @@index([date])
+}
+
+enum EventStatus {
+  PENDING
+  APPROVED
+  ACTIVE
+  ENDED
+  CANCELLED
+}
+
+model Proposal {
+  id                    String          @id @default(uuid())
+  eventId               String          @unique
+  event                 Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  
+  creatorId             String
+  creator               User            @relation(fields: [creatorId], references: [id])
+  
+  revenueBeneficiaries  Json
+  taxWalletAddress      String
+  
+  status                ProposalStatus  @default(PENDING)
+  adminComment          String?
+  
+  submittedAt           DateTime        @default(now())
+  reviewedAt            DateTime?
+  
+  @@index([status])
+  @@index([creatorId])
+}
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model TicketType {
+  id              String   @id @default(uuid())
+  typeId          Int      @default(autoincrement())
+  eventId         String
+  event           Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  
+  name            String
+  description     String?
+  price           String
+  stock           Int
+  sold            Int      @default(0)
+  
+  saleStartDate   DateTime
+  saleEndDate     DateTime
+  
+  benefits        Json?
+  active          Boolean  @default(true)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  tickets         Ticket[]
+  
+  @@unique([eventId, typeId])
+  @@index([eventId])
+  @@index([active])
+}
+
+model Ticket {
+  id                String        @id @default(uuid())
+  ticketId          Int           @unique
+  
+  eventId           String
+  event             Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  
+  typeId            String
+  ticketType        TicketType    @relation(fields: [typeId], references: [id])
+  
+  ownerId           String
+  owner             User          @relation(fields: [ownerId], references: [id])
+  
+  txHash            String
+  blockNumber       Int
+  originalPrice     String
+  
+  isUsed            Boolean       @default(false)
+  isForResale       Boolean       @default(false)
+  resalePrice       String?
+  resaleDeadline    DateTime?
+  resaleCount       Int           @default(0)
+  
+  qrCode            String        @unique
+  
+  mintedAt          DateTime
+  usedAt            DateTime?
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+  
+  transactions      Transaction[]
+  
+  @@index([ownerId])
+  @@index([eventId])
+  @@index([isForResale])
+  @@index([isUsed])
+}
+
+model Transaction {
+  id              String          @id @default(uuid())
+  txHash          String          @unique
+  
+  userId          String
+  user            User            @relation(fields: [userId], references: [id])
+  
+  type            TransactionType
+  
+  from            String
+  to              String?
+  amount          String
+  
+  eventId         String?
+  event           Event?          @relation(fields: [eventId], references: [id])
+  ticketId        String?
+  ticket          Ticket?         @relation(fields: [ticketId], references: [id])
+  
+  blockNumber     Int
+  timestamp       DateTime
+  
+  createdAt       DateTime        @default(now())
+  
+  @@index([userId])
+  @@index([type])
+  @@index([txHash])
+  @@index([timestamp])
+}
+
+enum TransactionType {
+  PURCHASE
+  RESALE_BUY
+  USE
+}
+
+model Favorite {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventId   String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, eventId])
+  @@index([userId])
+  @@index([eventId])
+}
+
+src/app.js
+
+require('./config/env');
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const { PORT, CORS_ORIGIN } = require('./config/env');
+const logger = require('./utils/logger');
+const errorHandler = require('./middleware/errorHandler');
+const limiter = require('./middleware/rateLimit');
+
+const adminRoutes = require('./routes/adminRoutes');
+const eventRoutes = require('./routes/eventRoutes');
+const ticketRoutes = require('./routes/ticketRoutes');
+const userRoutes = require('./routes/userRoutes');
+const resaleRoutes = require('./routes/resaleRoutes');
+const authRoutes = require('./routes/authRoutes');
+const eoRoutes = require('./routes/eoRoutes');
+
+const indexer = require('./services/indexerService');
+
+const app = express();
+
+app.use(helmet());
+app.use(cors({ origin: CORS_ORIGIN }));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(morgan('combined'));
+
+app.use(limiter);
+
+app.use('/api/admin', adminRoutes);
+app.use('/api/events', eventRoutes);
+app.use('/api/tickets', ticketRoutes);
+app.use('/api/users', userRoutes);
+app.use('/api/resale', resaleRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/eo', eoRoutes);
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+app.use(errorHandler);
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route not found'
+  });
+});
+
+const startServer = async () => {
+  try {
+    await indexer.start();
+    logger.info('Indexer started successfully');
+
+    app.listen(PORT, () => {
+      logger.info(`🚀 Server running on port ${PORT}`);
+      logger.info(`📊 Environment: ${process.env.NODE_ENV}`);
+    });
+  } catch (error) {
+    logger.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+process.on('SIGTERM', () => {
+  logger.info('SIGTERM received, shutting down gracefully');
+  indexer.stop();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  logger.info('SIGINT received, shutting down gracefully');
+  indexer.stop();
+  process.exit(0);
+});
+
+startServer();
+
+module.exports = app;
+
+::::::::::::::
+src/config/blockchain.js
+::::::::::::::
+const { ethers } = require('ethers');
+
+const EventChainABI = [
+  "function setPlatformWallet(address wallet) external",
+  "function setBackendSigner(address signer) external",
+  "function configureEvent(uint256 eventId, address eventCreator, address taxWallet) external returns (bool)",
+  "function buyTickets(uint256 eventId, uint256 typeId, uint256 quantity, uint256 pricePerTicket, address[] calldata beneficiaries, uint256[] calldata percentages) external payable returns (uint256[])",
+  "function listTicketForResale(uint256 ticketId, uint256 resalePrice, uint256 resaleDeadline) external",
+  "function buyResaleTicket(uint256 ticketId) external payable",
+  "function cancelResaleListing(uint256 ticketId) external",
+  "function useTicket(uint256 ticketId, uint256 eventId, bytes calldata signature) external",
+  "function getTicketDetails(uint256 ticketId) external view returns (tuple(uint256 ticketId, uint256 eventId, uint256 typeId, address currentOwner, uint256 originalPrice, bool isUsed, uint256 mintedAt, uint256 usedAt, bool isForResale, uint256 resalePrice, uint256 resaleDeadline, uint8 resaleCount))",
+  "function getResaleTickets() external view returns (uint256[])",
+  "function getUserTickets(address user) external view returns (uint256[])",
+  "function getUserEventTicketCount(address user, uint256 eventId) external view returns (uint256)",
+  "function canResell(uint256 ticketId) external view returns (bool)",
+  "function getMaxResalePrice(uint256 ticketId) external view returns (uint256)",
+  "function getEventCreator(uint256 eventId) external view returns (address)",
+  "event PlatformWalletUpdated(address indexed newWallet)",
+  "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
+  "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
+  "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
+  "event TicketListedForResale(uint256 indexed ticketId, uint256 indexed eventId, address indexed seller, uint256 resalePrice, uint256 deadline)",
+  "event TicketResold(uint256 indexed ticketId, uint256 indexed eventId, address indexed from, address to, uint256 price, uint256 taxAmount)",
+  "event ResaleListingCancelled(uint256 indexed ticketId, address indexed seller)",
+  "event TicketUsed(uint256 indexed ticketId, uint256 indexed eventId, address indexed user, uint256 timestamp)",
+  "event RevenueDistributed(uint256 indexed eventId, uint256 totalAmount, uint256 taxAmount, uint256 netAmount, uint256 timestamp)"
+];
+
+const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+const contract = new ethers.Contract(
+  process.env.CONTRACT_ADDRESS,
+  EventChainABI,
+  wallet
+);
+
+const readOnlyContract = new ethers.Contract(
+  process.env.CONTRACT_ADDRESS,
+  EventChainABI,
+  provider
+);
+
+module.exports = {
+  provider,
+  wallet,
+  contract,
+  readOnlyContract,
+  EventChainABI
+};::::::::::::::
+src/config/database.js
+::::::::::::::
+const { PrismaClient } = require('@prisma/client');
+
+const prisma = new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+});
+
+prisma.$connect()
+  .then(() => console.log('✅ Database connected'))
+  .catch((err) => console.error('❌ Database connection error:', err));
+
+module.exports = prisma;::::::::::::::
+src/config/env.js
+::::::::::::::
+require('dotenv').config();
+
+const requiredEnvVars = [
+  'DATABASE_URL',
+  'RPC_URL',
+  'CONTRACT_ADDRESS',
+  'PORT'
+];
+
+requiredEnvVars.forEach(varName => {
+  if (!process.env[varName]) {
+    throw new Error(`Missing required environment variable: ${varName}`);
+  }
+});
+
+module.exports = {
+  PORT: process.env.PORT || 3000,
+  NODE_ENV: process.env.NODE_ENV || 'development',
+  DATABASE_URL: process.env.DATABASE_URL,
+  RPC_URL: process.env.RPC_URL,
+  CONTRACT_ADDRESS: process.env.CONTRACT_ADDRESS,
+  START_BLOCK: process.env.START_BLOCK || 0,
+  CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
+  RATE_LIMIT_WINDOW: parseInt(process.env.RATE_LIMIT_WINDOW) || 15,
+  RATE_LIMIT_MAX: parseInt(process.env.RATE_LIMIT_MAX) || 100
+};::::::::::::::
+src/controllers/adminController.js
+::::::::::::::
+const prisma = require('../config/database');
+const blockchainService = require('../services/blockchainService');
+const logger = require('../utils/logger');
+const { successResponse, errorResponse } = require('../utils/response');
+
+class AdminController {
+  async getPendingProposals(req, res) {
+    try {
+      const proposals = await prisma.proposal.findMany({
+        where: { status: 'PENDING' },
+        include: {
+          event: {
+            include: {
+              ticketTypes: true,
+              creator: {
+                select: {
+                  id: true,
+                  walletAddress: true,
+                  name: true,
+                  email: true,
+                },
+              },
+            },
+          },
+        },
+        orderBy: { submittedAt: 'desc' },
+      });
+
+      return successResponse(res, proposals, 'Pending proposals retrieved');
+    } catch (error) {
+      logger.error('Error fetching proposals:', error);
+      return errorResponse(res, 'Failed to fetch proposals', 500);
+    }
+  }
+
+  async approveProposal(req, res) {
+    const { proposalId } = req.params;
+    const { taxWalletAddress, adminComment } = req.body;
+
+    try {
+      const proposal = await prisma.proposal.findUnique({
+        where: { id: proposalId },
+        include: {
+          event: {
+            include: {
+              creator: true,
+            },
+          },
+        },
+      });
+
+      if (!proposal) {
+        return errorResponse(res, 'Proposal not found', 404);
+      }
+
+      if (proposal.status !== 'PENDING') {
+        return errorResponse(res, 'Proposal already reviewed', 400);
+      }
+
+      const finalTaxWallet = taxWalletAddress || proposal.taxWalletAddress;
+
+      const blockchainResult = await blockchainService.configureEvent(
+        proposal.event.eventId,
+        proposal.event.creator.walletAddress,
+        finalTaxWallet
+      );
+
+      await prisma.$transaction([
+        prisma.proposal.update({
+          where: { id: proposalId },
+          data: {
+            status: 'APPROVED',
+            adminComment: adminComment || 'Approved',
+            reviewedAt: new Date(),
+            taxWalletAddress: finalTaxWallet,
+          },
+        }),
+        
+        prisma.event.update({
+          where: { id: proposal.eventId },
+          data: {
+            status: 'APPROVED',
+          },
+        }),
+      ]);
+
+      logger.info(`Proposal approved: ${proposalId}`);
+      return successResponse(res, {
+        proposalId,
+        txHash: blockchainResult.txHash,
+        blockNumber: blockchainResult.blockNumber,
+      }, 'Proposal approved successfully');
+    } catch (error) {
+      logger.error('Error approving proposal:', error);
+      return errorResponse(res, 'Failed to approve proposal', 500);
+    }
+  }
+
+  async rejectProposal(req, res) {
+    const { proposalId } = req.params;
+    const { adminComment } = req.body;
+
+    try {
+      const proposal = await prisma.proposal.findUnique({
+        where: { id: proposalId },
+      });
+
+      if (!proposal) {
+        return errorResponse(res, 'Proposal not found', 404);
+      }
+
+      if (proposal.status !== 'PENDING') {
+        return errorResponse(res, 'Proposal already reviewed', 400);
+      }
+
+      await prisma.$transaction([
+        prisma.proposal.update({
+          where: { id: proposalId },
+          data: {
+            status: 'REJECTED',
+            adminComment: adminComment || 'Rejected',
+            reviewedAt: new Date(),
+          },
+        }),
+        prisma.event.update({
+          where: { id: proposal.eventId },
+          data: {
+            status: 'CANCELLED',
+          },
+        }),
+      ]);
+
+      logger.info(`Proposal rejected: ${proposalId}`);
+      return successResponse(res, null, 'Proposal rejected');
+    } catch (error) {
+      logger.error('Error rejecting proposal:', error);
+      return errorResponse(res, 'Failed to reject proposal', 500);
+    }
+  }
+
+  async getTransactionStats(req, res) {
+    try {
+      const [
+        totalEvents,
+        activeEvents,
+        totalTicketsSold,
+        totalRevenue,
+        recentTransactions
+      ] = await Promise.all([
+        prisma.event.count(),
+        prisma.event.count({ where: { status: 'ACTIVE' } }),
+        prisma.ticket.count(),
+        prisma.transaction.aggregate({
+          where: { type: 'PURCHASE' },
+          _sum: { amount: true },
+        }),
+        prisma.transaction.findMany({
+          take: 10,
+          orderBy: { timestamp: 'desc' },
+          include: {
+            user: {
+              select: {
+                walletAddress: true,
+                name: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      return successResponse(res, {
+        totalEvents,
+        activeEvents,
+        totalTicketsSold,
+        totalRevenue: totalRevenue._sum.amount || '0',
+        recentTransactions,
+      }, 'Statistics retrieved');
+    } catch (error) {
+      logger.error('Error fetching stats:', error);
+      return errorResponse(res, 'Failed to fetch statistics', 500);
+    }
+  }
+
+  async getEventOrganizers(req, res) {
+    try {
+      const eos = await prisma.user.findMany({
+        where: { role: 'EO' },
+        select: {
+          id: true,
+          walletAddress: true,
+          name: true,
+          email: true,
+          createdAt: true,
+          _count: {
+            select: {
+              events: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return successResponse(res, eos, 'Event organizers retrieved');
+    } catch (error) {
+      logger.error('Error fetching EOs:', error);
+      return errorResponse(res, 'Failed to fetch event organizers', 500);
+    }
+  }
+}
+
+module.exports = new AdminController();::::::::::::::
+src/controllers/authController.js
+::::::::::::::
+const { ethers } = require('ethers');
+const jwt = require('jsonwebtoken');
+const prisma = require('../config/database');
+const logger = require('../utils/logger');
+const { successResponse, errorResponse } = require('../utils/response');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
+const JWT_EXPIRES_IN = '7d';
+
+class AuthController {
+  async login(req, res) {
+    try {
+      const { address, signature, message } = req.body;
+
+      if (!address || !signature || !message) {
+        return errorResponse(res, 'Missing required fields', 400);
+      }
+
+      if (!ethers.isAddress(address)) {
+        return errorResponse(res, 'Invalid address', 400);
+      }
+
+      try {
+        const recoveredAddress = ethers.verifyMessage(message, signature);
+        
+        if (recoveredAddress.toLowerCase() !== address.toLowerCase()) {
+          return errorResponse(res, 'Invalid signature', 401);
+        }
+      } catch (error) {
+        return errorResponse(res, 'Signature verification failed', 401);
+      }
+
+      let user = await prisma.user.findUnique({
+        where: { walletAddress: address.toLowerCase() }
+      });
+
+      if (!user) {
+        user = await prisma.user.create({
+          data: {
+            walletAddress: address.toLowerCase(),
+            role: 'USER'
+          }
+        });
+        logger.info(`New user registered: ${address}`);
+      }
+
+      const token = jwt.sign(
+        { 
+          userId: user.id,
+          address: user.walletAddress,
+          role: user.role
+        },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+
+      await prisma.walletHistory.create({
+        data: {
+          userId: user.id,
+          action: 'LOGIN',
+          details: {
+            timestamp: new Date().toISOString(),
+            ip: req.ip
+          }
+        }
+      });
+
+      return successResponse(res, {
+        token,
+        user: {
+          id: user.id,
+          walletAddress: user.walletAddress,
+          role: user.role
+        }
+      }, 'Login successful');
+    } catch (error) {
+      logger.error('Login error:', error);
+      return errorResponse(res, 'Login failed', 500);
+    }
+  }
+
+  async logout(req, res) {
+    try {
+      const { userId } = req.user;
+
+      await prisma.walletHistory.create({
+        data: {
+          userId,
+          action: 'LOGOUT',
+          details: {
+            timestamp: new Date().toISOString(),
+            ip: req.ip
+          }
+        }
+      });
+
+      logger.info(`User logged out: ${req.user.address}`);
+      return successResponse(res, null, 'Logout successful');
+    } catch (error) {
+      logger.error('Logout error:', error);
+      return errorResponse(res, 'Logout failed', 500);
+    }
+  }
+
+  async verifyToken(req, res) {
+    try {
+      const { userId, address, role } = req.user;
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true,
+          walletAddress: true,
+          role: true,
+          createdAt: true,
+          updatedAt: true
+        }
+      });
+
+      if (!user) {
+        return errorResponse(res, 'User not found', 404);
+      }
+
+      return successResponse(res, { user }, 'Token valid');
+    } catch (error) {
+      logger.error('Token verification error:', error);
+      return errorResponse(res, 'Token verification failed', 500);
+    }
+  }
+
+  async getNonce(req, res) {
+    try {
+      const { address } = req.params;
+
+      if (!ethers.isAddress(address)) {
+        return errorResponse(res, 'Invalid address', 400);
+      }
+
+      const nonce = Math.floor(Math.random() * 1000000);
+      const timestamp = Date.now();
+      const message = `Sign this message to authenticate with MyMineTicketKu\n\nNonce: ${nonce}\nTimestamp: ${timestamp}`;
+
+      return successResponse(res, { 
+        message,
+        nonce,
+        timestamp 
+      }, 'Nonce generated');
+    } catch (error) {
+      logger.error('Nonce generation error:', error);
+      return errorResponse(res, 'Failed to generate nonce', 500);
+    }
+  }
+
+  async checkAdmin(req, res) {
+    try {
+      const { address } = req.params;
+
+      if (!ethers.isAddress(address)) {
+        return errorResponse(res, 'Invalid address', 400);
+      }
+
+      const admin = await prisma.admin.findUnique({
+        where: { 
+          address: address.toLowerCase(),
+          active: true
+        }
+      });
+
+      return successResponse(res, { 
+        isAdmin: !!admin 
+      }, 'Admin check completed');
+    } catch (error) {
+      logger.error('Admin check error:', error);
+      return errorResponse(res, 'Admin check failed', 500);
+    }
+  }
+}
+
+module.exports = new AuthController();::::::::::::::
+src/controllers/eoController.js
+::::::::::::::
+const prisma = require('../config/database');
+const { successResponse, errorResponse } = require('../utils/response');
+const { generateTicketUseSignature } = require('../middleware/signature');
+const logger = require('../utils/logger');
+const { ethers } = require('ethers');
+
+class EOController {
+  async createEvent(req, res) {
+    try {
+      const {
+        name,
+        description,
+        location,
+        date,
+        posterUrl,
+        creatorAddress,
+        revenueBeneficiaries,
+        taxWalletAddress
+      } = req.body;
+
+      if (!name || !location || !date || !creatorAddress) {
+        return errorResponse(res, 'Missing required fields', 400);
+      }
+
+      if (!ethers.isAddress(creatorAddress)) {
+        return errorResponse(res, 'Invalid creator address', 400);
+      }
+
+      if (!revenueBeneficiaries || revenueBeneficiaries.length === 0) {
+        return errorResponse(res, 'At least one revenue beneficiary is required', 400);
+      }
+
+      if (revenueBeneficiaries.length > 10) {
+        return errorResponse(res, 'Maximum 10 beneficiaries allowed', 400);
+      }
+
+      const totalPercentage = revenueBeneficiaries.reduce((sum, b) => sum + b.percentage, 0);
+      if (totalPercentage !== 10000) {
+        return errorResponse(res, 'Revenue percentages must total 100% (10000 basis points)', 400);
+      }
+
+      for (const beneficiary of revenueBeneficiaries) {
+        if (!ethers.isAddress(beneficiary.address)) {
+          return errorResponse(res, `Invalid beneficiary address: ${beneficiary.address}`, 400);
+        }
+        if (beneficiary.percentage <= 0) {
+          return errorResponse(res, 'Beneficiary percentage must be greater than 0', 400);
+        }
+      }
+
+      if (taxWalletAddress && !ethers.isAddress(taxWalletAddress)) {
+        return errorResponse(res, 'Invalid tax wallet address', 400);
+      }
+
+      const eventDate = new Date(date);
+      if (eventDate <= new Date()) {
+        return errorResponse(res, 'Event date must be in the future', 400);
+      }
+
+      await prisma.user.upsert({
+        where: { walletAddress: creatorAddress.toLowerCase() },
+        create: { walletAddress: creatorAddress.toLowerCase(), role: 'EO' },
+        update: { role: 'EO' }
+      });
+
+      const user = await prisma.user.findUnique({
+        where: { walletAddress: creatorAddress.toLowerCase() }
+      });
+
+      const event = await prisma.event.create({
+        data: {
+          name,
+          description,
+          location,
+          date: eventDate,
+          posterUrl,
+          status: 'PENDING',
+          creatorId: user.id,
+        }
+      });
+
+      const proposal = await prisma.proposal.create({
+        data: {
+          eventId: event.id,
+          creatorId: user.id,
+          revenueBeneficiaries: revenueBeneficiaries,
+          taxWalletAddress: taxWalletAddress || creatorAddress.toLowerCase(),
+          status: 'PENDING'
+        }
+      });
+
+      logger.info(`Event created: ${event.id} by ${creatorAddress}`);
+      return successResponse(res, { event, proposal }, 'Event created and submitted for approval');
+    } catch (error) {
+      logger.error('Error creating event:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async getEOEvents(req, res) {
+    try {
+      const { address } = req.params;
+
+      if (!ethers.isAddress(address)) {
+        return errorResponse(res, 'Invalid address', 400);
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { walletAddress: address.toLowerCase() }
+      });
+
+      if (!user) {
+        return errorResponse(res, 'User not found', 404);
+      }
+
+      const events = await prisma.event.findMany({
+        where: { creatorId: user.id },
+        include: {
+          ticketTypes: true,
+          proposals: true,
+          _count: {
+            select: { tickets: true }
+          }
+        },
+        orderBy: { createdAt: 'desc' }
+      });
+
+      return successResponse(res, events, 'EO events retrieved successfully');
+    } catch (error) {
+      logger.error('Error getting EO events:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async updateEvent(req, res) {
+    try {
+      const { eventId } = req.params;
+      const { description, location, posterUrl } = req.body;
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.status === 'ACTIVE') {
+        return errorResponse(res, 'Cannot update active event', 400);
+      }
+
+      const updatedEvent = await prisma.event.update({
+        where: { id: eventId },
+        data: {
+          description,
+          location,
+          posterUrl,
+          updatedAt: new Date()
+        }
+      });
+
+      logger.info(`Event updated: ${eventId}`);
+      return successResponse(res, updatedEvent, 'Event updated successfully');
+    } catch (error) {
+      logger.error('Error updating event:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async deactivateEvent(req, res) {
+    try {
+      const { eventId } = req.params;
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId },
+        include: {
+          tickets: {
+            where: {
+              isUsed: false
+            }
+          }
+        }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.tickets.length > 0) {
+        return errorResponse(res, 'Cannot deactivate event with unused tickets', 400);
+      }
+
+      const updatedEvent = await prisma.event.update({
+        where: { id: eventId },
+        data: { status: 'ENDED' }
+      });
+
+      logger.info(`Event deactivated: ${eventId}`);
+      return successResponse(res, updatedEvent, 'Event deactivated successfully');
+    } catch (error) {
+      logger.error('Error deactivating event:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async addTicketType(req, res) {
+    try {
+      const { eventId } = req.params;
+      const {
+        name,
+        description,
+        price,
+        stock,
+        saleStartDate,
+        saleEndDate,
+        benefits
+      } = req.body;
+
+      if (!name || !price || !stock || !saleStartDate || !saleEndDate) {
+        return errorResponse(res, 'Missing required fields', 400);
+      }
+
+      const parsedStock = parseInt(stock);
+      if (parsedStock <= 0) {
+        return errorResponse(res, 'Stock must be greater than 0', 400);
+      }
+
+      const startDate = new Date(saleStartDate);
+      const endDate = new Date(saleEndDate);
+      
+      if (startDate >= endDate) {
+        return errorResponse(res, 'Sale start date must be before end date', 400);
+      }
+
+      if (endDate <= new Date()) {
+        return errorResponse(res, 'Sale end date must be in the future', 400);
+      }
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.status !== 'APPROVED') {
+        return errorResponse(res, 'Event must be approved before adding ticket types', 400);
+      }
+
+      const ticketType = await prisma.ticketType.create({
+        data: {
+          eventId: event.id,
+          name,
+          description,
+          price,
+          stock: parsedStock,
+          sold: 0,
+          saleStartDate: startDate,
+          saleEndDate: endDate,
+          benefits: benefits || {}
+        }
+      });
+
+      await prisma.event.update({
+        where: { id: eventId },
+        data: { status: 'ACTIVE' }
+      });
+
+      logger.info(`Ticket type added for event ${eventId}`);
+      return successResponse(res, ticketType, 'Ticket type added successfully');
+    } catch (error) {
+      logger.error('Error adding ticket type:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async updateTicketType(req, res) {
+    try {
+      const { typeId } = req.params;
+      const { price, stock, saleStartDate, saleEndDate, benefits } = req.body;
+
+      const existingType = await prisma.ticketType.findUnique({
+        where: { id: typeId },
+        include: {
+          event: true
+        }
+      });
+
+      if (!existingType) {
+        return errorResponse(res, 'Ticket type not found', 404);
+      }
+
+      if (existingType.event.status === 'ACTIVE') {
+        if (stock && parseInt(stock) < existingType.sold) {
+          return errorResponse(res, 'Cannot reduce stock below sold tickets', 400);
+        }
+      }
+
+      const updateData = {};
+      
+      if (price !== undefined) updateData.price = price;
+      if (stock !== undefined) updateData.stock = parseInt(stock);
+      if (saleStartDate !== undefined) updateData.saleStartDate = new Date(saleStartDate);
+      if (saleEndDate !== undefined) updateData.saleEndDate = new Date(saleEndDate);
+      if (benefits !== undefined) updateData.benefits = benefits;
+
+      if (updateData.saleStartDate && updateData.saleEndDate) {
+        if (updateData.saleStartDate >= updateData.saleEndDate) {
+          return errorResponse(res, 'Sale start date must be before end date', 400);
+        }
+      }
+
+      const ticketType = await prisma.ticketType.update({
+        where: { id: typeId },
+        data: updateData
+      });
+
+      logger.info(`Ticket type updated: ${typeId}`);
+      return successResponse(res, ticketType, 'Ticket type updated successfully');
+    } catch (error) {
+      logger.error('Error updating ticket type:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async getTicketTypes(req, res) {
+    try {
+      const { eventId } = req.params;
+
+      const ticketTypes = await prisma.ticketType.findMany({
+        where: { eventId },
+        orderBy: { createdAt: 'asc' }
+      });
+
+      return successResponse(res, ticketTypes, 'Ticket types retrieved successfully');
+    } catch (error) {
+      logger.error('Error getting ticket types:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async getEventRevenue(req, res) {
+    try {
+      const { eventId } = req.params;
+
+      const transactions = await prisma.transaction.findMany({
+        where: {
+          eventId,
+          type: 'PURCHASE'
+        }
+      });
+
+      const totalRevenue = transactions.reduce((sum, tx) => {
+        return sum + BigInt(tx.amount);
+      }, BigInt(0));
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId },
+        include: {
+          proposals: {
+            where: { status: 'APPROVED' }
+          }
+        }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      let revenueShares = [];
+      if (event.proposals.length > 0) {
+        revenueShares = event.proposals[0].revenueBeneficiaries;
+      }
+
+      const TAX_PERCENTAGE = 1000;
+      const BASIS_POINTS = 10000;
+      
+      const taxAmount = (totalRevenue * BigInt(TAX_PERCENTAGE)) / BigInt(BASIS_POINTS);
+      const netAmount = totalRevenue - taxAmount;
+
+      const detailedShares = revenueShares.map(share => {
+        const shareAmount = (netAmount * BigInt(share.percentage)) / BigInt(BASIS_POINTS);
+        return {
+          address: share.address,
+          name: share.name || 'Unknown',
+          percentage: share.percentage,
+          amount: shareAmount.toString()
+        };
+      });
+
+      return successResponse(res, {
+        totalRevenue: totalRevenue.toString(),
+        taxAmount: taxAmount.toString(),
+        netAmount: netAmount.toString(),
+        transactions: transactions.length,
+        revenueShares: detailedShares
+      }, 'Revenue retrieved successfully');
+    } catch (error) {
+      logger.error('Error getting revenue:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async getEventAnalytics(req, res) {
+    try {
+      const { eventId } = req.params;
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId },
+        include: {
+          ticketTypes: true,
+          tickets: true,
+          transactions: {
+            where: { type: 'PURCHASE' }
+          }
+        }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      const totalTicketsSold = event.tickets.length;
+      const totalRevenue = event.transactions.reduce((sum, tx) => {
+        return sum + BigInt(tx.amount);
+      }, BigInt(0));
+
+      const ticketStats = event.ticketTypes.map(type => ({
+        typeName: type.name,
+        sold: type.sold,
+        totalSupply: type.stock,
+        percentage: type.stock > 0 ? (type.sold / type.stock * 100).toFixed(2) : 0
+      }));
+
+      const salesByDay = await this.getSalesByDay(eventId);
+
+      return successResponse(res, {
+        totalTicketsSold,
+        totalRevenue: totalRevenue.toString(),
+        ticketStats,
+        salesByDay,
+        activeListings: event.tickets.filter(t => t.isForResale).length,
+        usedTickets: event.tickets.filter(t => t.isUsed).length
+      }, 'Analytics retrieved successfully');
+    } catch (error) {
+      logger.error('Error getting analytics:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async getDashboardStats(req, res) {
+    try {
+      const { address } = req.params;
+
+      if (!ethers.isAddress(address)) {
+        return errorResponse(res, 'Invalid address', 400);
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { walletAddress: address.toLowerCase() }
+      });
+
+      if (!user) {
+        return errorResponse(res, 'User not found', 404);
+      }
+
+      const events = await prisma.event.findMany({
+        where: { creatorId: user.id },
+        include: {
+          tickets: true,
+          transactions: {
+            where: { type: 'PURCHASE' }
+          }
+        }
+      });
+
+      const totalEvents = events.length;
+      const activeEvents = events.filter(e => e.status === 'ACTIVE').length;
+      const totalTicketsSold = events.reduce((sum, e) => sum + e.tickets.length, 0);
+      const totalRevenue = events.reduce((sum, e) => {
+        return sum + e.transactions.reduce((txSum, tx) => {
+          return txSum + BigInt(tx.amount);
+        }, BigInt(0));
+      }, BigInt(0));
+
+      return successResponse(res, {
+        totalEvents,
+        activeEvents,
+        totalTicketsSold,
+        totalRevenue: totalRevenue.toString()
+      }, 'Dashboard stats retrieved successfully');
+    } catch (error) {
+      logger.error('Error getting dashboard stats:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async verifyTicket(req, res) {
+    try {
+      const { ticketId } = req.params;
+
+      const ticket = await prisma.ticket.findUnique({
+        where: { ticketId: parseInt(ticketId) },
+        include: {
+          event: {
+            include: { creator: true }
+          },
+          ticketType: true,
+          owner: true
+        }
+      });
+
+      if (!ticket) {
+        return errorResponse(res, 'Ticket not found', 404);
+      }
+
+      const signature = await generateTicketUseSignature(
+        ticket.ticketId,
+        ticket.event.eventId,
+        req.body.scannerAddress || ticket.owner.walletAddress
+      );
+
+      const qrData = {
+        ticketId: ticket.ticketId,
+        eventId: ticket.event.eventId,
+        eventName: ticket.event.name,
+        ticketType: ticket.ticketType.name,
+        currentOwner: ticket.owner.walletAddress,
+        isUsed: ticket.isUsed,
+        isValid: !ticket.isUsed && new Date(ticket.event.date) >= new Date(),
+        signature
+      };
+
+      return successResponse(res, qrData, 'Ticket verified successfully');
+    } catch (error) {
+      logger.error('Error verifying ticket:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async useTicket(req, res) {
+    try {
+      const { ticketId } = req.params;
+      const { eventCreatorAddress, scannerAddress } = req.body;
+
+      if (!eventCreatorAddress || !ethers.isAddress(eventCreatorAddress)) {
+        return errorResponse(res, 'Valid event creator address required', 400);
+      }
+
+      if (scannerAddress && !ethers.isAddress(scannerAddress)) {
+        return errorResponse(res, 'Invalid scanner address', 400);
+      }
+
+      const ticket = await prisma.ticket.findFirst({
+        where: { ticketId: parseInt(ticketId) },
+        include: { 
+          event: {
+            include: { creator: true }
+          },
+          owner: true
+        }
+      });
+
+      if (!ticket) {
+        return errorResponse(res, 'Ticket not found', 404);
+      }
+
+      if (ticket.event.creator.walletAddress.toLowerCase() !== eventCreatorAddress.toLowerCase()) {
+        return errorResponse(res, 'Unauthorized', 403);
+      }
+
+      if (ticket.isUsed) {
+        return errorResponse(res, 'Ticket already used', 400);
+      }
+
+      const signature = await generateTicketUseSignature(
+        ticket.ticketId,
+        ticket.event.eventId,
+        scannerAddress || ticket.owner.walletAddress
+      );
+
+      logger.info(`Ticket use signature generated for ticket ${ticketId}`);
+      return successResponse(res, { 
+        ticketId: ticket.ticketId,
+        eventId: ticket.event.eventId,
+        signature,
+        message: 'Use this signature to call useTicket() on smart contract'
+      }, 'Signature generated successfully');
+    } catch (error) {
+      logger.error('Error using ticket:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async getSalesByDay(eventId) {
+    const transactions = await prisma.transaction.findMany({
+      where: {
+        eventId,
+        type: 'PURCHASE'
+      },
+      orderBy: { timestamp: 'asc' }
+    });
+
+    const salesByDay = {};
+    transactions.forEach(tx => {
+      const date = tx.timestamp.toISOString().split('T')[0];
+      if (!salesByDay[date]) {
+        salesByDay[date] = 0;
+      }
+      salesByDay[date]++;
+    });
+
+    return Object.entries(salesByDay).map(([date, count]) => ({
+      date,
+      sales: count
+    }));
+  }
+}
+
+module.exports = new EOController();::::::::::::::
+src/controllers/eventController.js
+::::::::::::::
+const eventService = require('../services/eventService');
+const { successResponse, errorResponse } = require('../utils/response');
+
+class EventController {
+  async getAllEvents(req, res) {
+    try {
+      const filters = {
+        status: req.query.status,
+        location: req.query.location,
+        search: req.query.search,
+        sortBy: req.query.sortBy,
+        order: req.query.order
+      };
+
+      const events = await eventService.getAllEvents(filters);
+      return successResponse(res, events, 'Events retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async getEventById(req, res) {
+    try {
+      const { eventId } = req.params;
+      const event = await eventService.getEventById(eventId);
+      return successResponse(res, event, 'Event retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message, 404);
+    }
+  }
+
+  async getEventsByCreator(req, res) {
+    try {
+      const { address } = req.params;
+      const events = await eventService.getEventsByCreator(address);
+      return successResponse(res, events, 'Creator events retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async getEventStatistics(req, res) {
+    try {
+      const { eventId } = req.params;
+      const stats = await eventService.getEventStatistics(eventId);
+      return successResponse(res, stats, 'Event statistics retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message, 404);
+    }
+  }
+
+  async toggleFavorite(req, res) {
+    try {
+      const { eventId } = req.params;
+      const { userId } = req.body;
+
+      if (!userId) {
+        return errorResponse(res, 'User ID is required', 400);
+      }
+
+      const result = await eventService.toggleFavorite(userId, eventId);
+      return successResponse(res, result, 'Favorite toggled successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async getUserFavorites(req, res) {
+    try {
+      const { userId } = req.params;
+      const favorites = await eventService.getUserFavorites(userId);
+      return successResponse(res, favorites, 'Favorites retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+}
+
+module.exports = new EventController();::::::::::::::
+src/controllers/ticketController.js
+::::::::::::::
+const ticketService = require('../services/ticketService');
+const { successResponse, errorResponse } = require('../utils/response');
+
+class TicketController {
+  async getUserTickets(req, res) {
+    try {
+      const { address } = req.params;
+      const filters = {
+        status: req.query.status,
+        eventId: req.query.eventId
+      };
+
+      const tickets = await ticketService.getUserTickets(address, filters);
+      return successResponse(res, tickets, 'User tickets retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async getTicketById(req, res) {
+    try {
+      const { ticketId } = req.params;
+      const ticket = await ticketService.getTicketById(ticketId);
+      return successResponse(res, ticket, 'Ticket retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message, 404);
+    }
+  }
+
+  async getResaleTickets(req, res) {
+    try {
+      const filters = {
+        eventId: req.query.eventId,
+        minPrice: req.query.minPrice,
+        maxPrice: req.query.maxPrice
+      };
+
+      const tickets = await ticketService.getResaleTickets(filters);
+      return successResponse(res, tickets, 'Resale tickets retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async getTicketTransactionHistory(req, res) {
+    try {
+      const { ticketId } = req.params;
+      const history = await ticketService.getTicketTransactionHistory(ticketId);
+      return successResponse(res, history, 'Transaction history retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async getUserTransactionHistory(req, res) {
+    try {
+      const { address } = req.params;
+      const filters = {
+        type: req.query.type,
+        eventId: req.query.eventId
+      };
+
+      const history = await ticketService.getUserTransactionHistory(address, filters);
+      return successResponse(res, history, 'User transaction history retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async checkPurchaseEligibility(req, res) {
+    try {
+      const { address, eventId } = req.params;
+      const { quantity } = req.query;
+
+      const eligibility = await ticketService.checkPurchaseEligibility(
+        address,
+        eventId,
+        parseInt(quantity) || 1
+      );
+
+      return successResponse(res, eligibility, 'Eligibility checked successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async getTicketTypeAvailability(req, res) {
+    try {
+      const { eventId, typeId } = req.params;
+      const availability = await ticketService.getTicketTypeAvailability(eventId, typeId);
+      return successResponse(res, availability, 'Availability retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message, 404);
+    }
+  }
+}
+
+module.exports = new TicketController();::::::::::::::
+src/middleware/auth.js
+::::::::::::::
+const jwt = require('jsonwebtoken');
+const prisma = require('../config/database');
+const { errorResponse } = require('../utils/response');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this';
+
+const authenticate = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return errorResponse(res, 'No token provided', 401);
+    }
+
+    const token = authHeader.substring(7);
+
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      
+      req.user = {
+        userId: decoded.userId,
+        address: decoded.address,
+        role: decoded.role
+      };
+
+      next();
+    } catch (err) {
+      if (err.name === 'TokenExpiredError') {
+        return errorResponse(res, 'Token expired', 401);
+      }
+      return errorResponse(res, 'Invalid token', 401);
+    }
+  } catch (error) {
+    return errorResponse(res, 'Authentication failed', 500);
+  }
+};
+
+const requireAdmin = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return errorResponse(res, 'Authentication required', 401);
+    }
+
+    const admin = await prisma.admin.findUnique({
+      where: { 
+        address: req.user.address.toLowerCase(),
+        active: true
+      }
+    });
+
+    if (!admin) {
+      return errorResponse(res, 'Admin access required', 403);
+    }
+
+    req.admin = admin;
+    next();
+  } catch (error) {
+    return errorResponse(res, 'Admin verification failed', 500);
+  }
+};
+
+const requireEO = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return errorResponse(res, 'Authentication required', 401);
+    }
+
+    if (req.user.role !== 'EO' && req.user.role !== 'ADMIN') {
+      return errorResponse(res, 'Event organizer access required', 403);
+    }
+
+    next();
+  } catch (error) {
+    return errorResponse(res, 'Authorization failed', 500);
+  }
+};
+
+const optionalAuth = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.substring(7);
+      
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.user = {
+          userId: decoded.userId,
+          address: decoded.address,
+          role: decoded.role
+        };
+      } catch (err) {
+        req.user = null;
+      }
+    }
+    
+    next();
+  } catch (error) {
+    next();
+  }
+};
+
+module.exports = {
+  authenticate,
+  requireAdmin,
+  requireEO,
+  optionalAuth
+};::::::::::::::
+src/middleware/errorHandler.js
+::::::::::::::
+const logger = require('../utils/logger');
+
+const errorHandler = (err, req, res, next) => {
+  logger.error('Error:', {
+    message: err.message,
+    stack: err.stack,
+    path: req.path,
+    method: req.method
+  });
+
+  if (err.name === 'ValidationError') {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation Error',
+      errors: err.errors
+    });
+  }
+
+  if (err.name === 'PrismaClientKnownRequestError') {
+    return res.status(400).json({
+      success: false,
+      message: 'Database Error',
+      error: err.message
+    });
+  }
+
+  return res.status(err.statusCode || 500).json({
+    success: false,
+    message: err.message || 'Internal Server Error'
+  });
+};
+
+module.exports = errorHandler;::::::::::::::
+src/middleware/rateLimit.js
+::::::::::::::
+const rateLimit = require('express-rate-limit');
+const { RATE_LIMIT_WINDOW, RATE_LIMIT_MAX } = require('../config/env');
+
+const limiter = rateLimit({
+  windowMs: RATE_LIMIT_WINDOW * 60 * 1000,
+  max: RATE_LIMIT_MAX,
+  message: {
+    success: false,
+    message: 'Too many requests, please try again later.'
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+module.exports = limiter;::::::::::::::
+src/middleware/signature.js
+::::::::::::::
+const { ethers } = require('ethers');
+const logger = require('../utils/logger');
+
+const BACKEND_PRIVATE_KEY = process.env.BACKEND_SIGNER_PRIVATE_KEY;
+
+if (!BACKEND_PRIVATE_KEY) {
+  throw new Error('BACKEND_SIGNER_PRIVATE_KEY not configured');
+}
+
+const signer = new ethers.Wallet(BACKEND_PRIVATE_KEY);
+
+async function generateTicketUseSignature(ticketId, eventId, scannerAddress) {
+  try {
+    const chainId = parseInt(process.env.CHAIN_ID);
+    
+    const messageHash = ethers.solidityPackedKeccak256(
+      ['uint256', 'uint256', 'address', 'uint256'],
+      [ticketId, eventId, scannerAddress, chainId]
+    );
+
+    const messageBytes = ethers.getBytes(messageHash);
+    const signature = await signer.signMessage(messageBytes);
+    
+    return signature;
+  } catch (error) {
+    logger.error('Error generating ticket use signature:', error);
+    throw error;
+  }
+}
+
+async function verifyTicketUseSignature(ticketId, eventId, scannerAddress, signature) {
+  try {
+    const chainId = parseInt(process.env.CHAIN_ID);
+    
+    const messageHash = ethers.solidityPackedKeccak256(
+      ['uint256', 'uint256', 'address', 'uint256'],
+      [ticketId, eventId, scannerAddress, chainId]
+    );
+
+    const messageBytes = ethers.getBytes(messageHash);
+    const recoveredAddress = ethers.verifyMessage(messageBytes, signature);
+    
+    return recoveredAddress.toLowerCase() === signer.address.toLowerCase();
+  } catch (error) {
+    logger.error('Error verifying signature:', error);
+    return false;
+  }
+}
+
+module.exports = {
+  generateTicketUseSignature,
+  verifyTicketUseSignature,
+  signerAddress: signer.address
+};::::::::::::::
+src/middleware/validation.js
+::::::::::::::
+const { ethers } = require('ethers');
+const { errorResponse } = require('../utils/response');
+
+const validateAdmin = (req, res, next) => {
+    if (req.body.adminAddress && !ethers.isAddress(req.body.adminAddress)) {
+        return errorResponse(res, 400, 'Invalid admin address format');
+    }
+
+    if (req.params.eventId && isNaN(req.params.eventId)) {
+        return errorResponse(res, 400, 'Invalid event ID format');
+    }
+
+    next();
+};
+
+module.exports = {
+    validateAdmin,
+    // TODO: Add other validators here
+};::::::::::::::
+src/routes/adminRoutes.js
+::::::::::::::
+const express = require('express');
+const router = express.Router();
+const adminController = require('../controllers/adminController');
+const { auth } = require('../middleware/auth');
+const { validateAdmin } = require('../middleware/validation');
+
+router.post('/add', auth, validateAdmin, adminController.addAdmin);
+router.post('/remove', auth, validateAdmin, adminController.removeAdmin);
+
+router.post('/events/:eventId/approve', auth, validateAdmin, adminController.approveEvent);
+router.post('/events/:eventId/reject', auth, validateAdmin, adminController.rejectEvent);
+
+router.get('/stats', auth, validateAdmin, adminController.getAdminStats);
+router.get('/events/pending', auth, validateAdmin, adminController.getPendingEvents);
+router.get('/verify/:address', auth, validateAdmin, adminController.verifyAdmin);
+
+module.exports = router;::::::::::::::
+src/routes/authRoutes.js
+::::::::::::::
+const express = require('express');
+const router = express.Router();
+const authController = require('../controllers/authController');
+const { authenticate } = require('../middleware/auth');
+
+router.get('/nonce/:address', authController.getNonce);
+router.post('/login', authController.login);
+router.get('/admin-check/:address', authController.checkAdmin);
+
+router.post('/logout', authenticate, authController.logout);
+router.get('/verify', authenticate, authController.verifyToken);
+
+module.exports = router;::::::::::::::
+src/routes/eoRoutes.js
+::::::::::::::
+const express = require('express');
+const router = express.Router();
+const eoController = require('../controllers/eoController');
+
+router.post('/events', eoController.createEvent);
+router.get('/events/:address', eoController.getEOEvents);
+router.get('/events/:eventId/details', eoController.getEventDetails);
+router.put('/events/:eventId', eoController.updateEvent);
+router.delete('/events/:eventId', eoController.deactivateEvent);
+
+router.post('/events/:eventId/ticket-types', eoController.addTicketType);
+router.put('/events/:eventId/ticket-types/:typeId', eoController.updateTicketType);
+router.get('/events/:eventId/ticket-types', eoController.getTicketTypes);
+
+router.get('/events/:eventId/revenue', eoController.getEventRevenue);
+router.get('/events/:eventId/analytics', eoController.getEventAnalytics);
+router.get('/dashboard/:address', eoController.getDashboardStats);
+
+router.post('/tickets/:ticketId/verify', eoController.verifyTicket);
+router.post('/tickets/:ticketId/use', eoController.useTicket);
+
+module.exports = router;::::::::::::::
+src/routes/eventRoutes.js
+::::::::::::::
+const express = require('express');
+const router = express.Router();
+const eventController = require('../controllers/eventController');
+
+router.get('/', eventController.getAllEvents);
+router.get('/:eventId', eventController.getEventById);
+router.get('/creator/:address', eventController.getEventsByCreator);
+router.get('/:eventId/statistics', eventController.getEventStatistics);
+
+router.post('/:eventId/favorite', eventController.toggleFavorite);
+router.get('/favorites/:userId', eventController.getUserFavorites);
+
+module.exports = router;::::::::::::::
+src/routes/resaleRoutes.js
+::::::::::::::
+const express = require('express');
+const router = express.Router();
+const ticketController = require('../controllers/ticketController');
+const ticketService = require('../services/ticketService');
+
+router.get('/', ticketController.getResaleTickets);
+
+router.get('/:ticketId', async (req, res) => {
+  try {
+    const ticket = await ticketService.getTicketById(req.params.ticketId);
+    res.json({ success: true, data: ticket });
+  } catch (error) {
+    res.status(404).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/event/:eventId', async (req, res) => {
+  try {
+    const tickets = await ticketService.getResaleTickets({ 
+      eventId: req.params.eventId 
+    });
+    res.json({ success: true, data: tickets });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+module.exports = router;::::::::::::::
+src/routes/ticketRoutes.js
+::::::::::::::
+const express = require('express');
+const router = express.Router();
+const ticketController = require('../controllers/ticketController');
+
+router.get('/user/:address', ticketController.getUserTickets);
+router.get('/resale', ticketController.getResaleTickets);
+router.get('/:ticketId', ticketController.getTicketById);
+router.get('/:ticketId/history', ticketController.getTicketTransactionHistory);
+
+router.get('/availability/:eventId/:typeId', ticketController.getTicketTypeAvailability);
+router.get('/eligibility/:address/:eventId', ticketController.checkPurchaseEligibility);
+
+module.exports = router;::::::::::::::
+src/routes/userRoutes.js
+::::::::::::::
+const express = require('express');
+const router = express.Router();
+const ticketController = require('../controllers/ticketController');
+const eventService = require('../services/eventService');
+const ticketService = require('../services/ticketService');
+
+router.get('/:address/tickets', ticketController.getUserTickets);
+
+router.get('/:address/transactions', ticketController.getUserTransactionHistory);
+
+router.get('/:address/events', async (req, res) => {
+  try {
+    const events = await eventService.getEventsByCreator(req.params.address);
+    res.json({ success: true, data: events });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/:address/purchases', async (req, res) => {
+  try {
+    const purchases = await ticketService.getUserTransactionHistory(
+      req.params.address,
+      { type: 'TICKET_PURCHASE' }
+    );
+    res.json({ success: true, data: purchases });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.get('/:address/resales', async (req, res) => {
+  try {
+    const resales = await ticketService.getUserTransactionHistory(
+      req.params.address,
+      { type: 'TICKET_RESALE' }
+    );
+    res.json({ success: true, data: resales });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+module.exports = router;::::::::::::::
+src/services/blockchainService.js
+::::::::::::::
+const { ethers } = require('ethers');
+const logger = require('../utils/logger');
+
+const EventChainABI = [
+  "function setPlatformWallet(address wallet) external",
+  "function setBackendSigner(address signer) external",
+  "function configureEvent(uint256 eventId, address eventCreator, address taxWallet) external returns (bool)",
+  "function buyTickets(uint256 eventId, uint256 typeId, uint256 quantity, uint256 pricePerTicket, address[] calldata beneficiaries, uint256[] calldata percentages) external payable returns (uint256[])",
+  "function listTicketForResale(uint256 ticketId, uint256 resalePrice, uint256 resaleDeadline) external",
+  "function buyResaleTicket(uint256 ticketId) external payable",
+  "function cancelResaleListing(uint256 ticketId) external",
+  "function useTicket(uint256 ticketId, uint256 eventId, bytes calldata signature) external",
+  "function getTicketDetails(uint256 ticketId) external view returns (tuple(uint256 ticketId, uint256 eventId, uint256 typeId, address currentOwner, uint256 originalPrice, bool isUsed, uint256 mintedAt, uint256 usedAt, bool isForResale, uint256 resalePrice, uint256 resaleDeadline, uint8 resaleCount))",
+  "function getResaleTickets() external view returns (uint256[])",
+  "function getUserTickets(address user) external view returns (uint256[])",
+  "function getUserEventTicketCount(address user, uint256 eventId) external view returns (uint256)",
+  "function canResell(uint256 ticketId) external view returns (bool)",
+  "function getMaxResalePrice(uint256 ticketId) external view returns (uint256)",
+  "function getEventCreator(uint256 eventId) external view returns (address)",
+  "event PlatformWalletUpdated(address indexed newWallet)",
+  "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
+  "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
+  "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
+  "event TicketListedForResale(uint256 indexed ticketId, uint256 indexed eventId, address indexed seller, uint256 resalePrice, uint256 deadline)",
+  "event TicketResold(uint256 indexed ticketId, uint256 indexed eventId, address indexed from, address to, uint256 price, uint256 taxAmount)",
+  "event ResaleListingCancelled(uint256 indexed ticketId, address indexed seller)",
+  "event TicketUsed(uint256 indexed ticketId, uint256 indexed eventId, address indexed user, uint256 timestamp)",
+  "event RevenueDistributed(uint256 indexed eventId, uint256 totalAmount, uint256 taxAmount, uint256 netAmount, uint256 timestamp)"
+];
+
+class BlockchainService {
+  constructor() {
+    this.provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    this.wallet = new ethers.Wallet(process.env.PRIVATE_KEY, this.provider);
+    this.contract = new ethers.Contract(
+      process.env.CONTRACT_ADDRESS,
+      EventChainABI,
+      this.wallet
+    );
+    this.readOnlyContract = new ethers.Contract(
+      process.env.CONTRACT_ADDRESS,
+      EventChainABI,
+      this.provider
+    );
+  }
+
+  async configureEvent(eventId, eventCreator, taxWallet) {
+    try {
+      if (!ethers.isAddress(eventCreator)) {
+        throw new Error('Invalid event creator address');
+      }
+      if (!ethers.isAddress(taxWallet)) {
+        throw new Error('Invalid tax wallet address');
+      }
+
+      const tx = await this.contract.configureEvent(
+        eventId,
+        eventCreator,
+        taxWallet
+      );
+
+      const receipt = await tx.wait();
+      
+      if (!receipt || receipt.status !== 1) {
+        throw new Error('Transaction failed');
+      }
+
+      logger.info(`Event configured: ${eventId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error configuring event:', {
+        message: error.message,
+        reason: error.reason,
+        code: error.code
+      });
+      throw error;
+    }
+  }
+
+  async buyTickets(eventId, typeId, quantity, pricePerTicket, beneficiaries, percentages) {
+    try {
+      if (beneficiaries.length !== percentages.length) {
+        throw new Error('Beneficiaries and percentages length mismatch');
+      }
+
+      const totalPercentage = percentages.reduce((sum, p) => sum + p, 0);
+      if (totalPercentage !== 10000) {
+        throw new Error('Total percentages must equal 10000 (100%)');
+      }
+
+      beneficiaries.forEach(addr => {
+        if (!ethers.isAddress(addr)) {
+          throw new Error(`Invalid beneficiary address: ${addr}`);
+        }
+      });
+
+      const totalCost = BigInt(pricePerTicket) * BigInt(quantity);
+
+      const tx = await this.contract.buyTickets(
+        eventId,
+        typeId,
+        quantity,
+        pricePerTicket,
+        beneficiaries,
+        percentages,
+        { value: totalCost }
+      );
+
+      const receipt = await tx.wait();
+      
+      if (!receipt || receipt.status !== 1) {
+        throw new Error('Transaction failed');
+      }
+
+      const ticketIds = [];
+      for (const log of receipt.logs) {
+        try {
+          const parsed = this.contract.interface.parseLog(log);
+          if (parsed && parsed.name === 'TicketMinted') {
+            ticketIds.push(parsed.args.ticketId.toString());
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+
+      logger.info(`Tickets purchased: ${ticketIds.length} tickets. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+        ticketIds
+      };
+    } catch (error) {
+      logger.error('Error buying tickets:', {
+        message: error.message,
+        reason: error.reason,
+        code: error.code
+      });
+      throw error;
+    }
+  }
+
+  async listTicketForResale(ticketId, resalePrice, resaleDeadline) {
+    try {
+      const maxPrice = await this.getMaxResalePrice(ticketId);
+      if (BigInt(resalePrice) > BigInt(maxPrice)) {
+        throw new Error(`Resale price exceeds maximum allowed: ${maxPrice}`);
+      }
+
+      if (resaleDeadline <= Math.floor(Date.now() / 1000)) {
+        throw new Error('Resale deadline must be in the future');
+      }
+
+      const tx = await this.contract.listTicketForResale(
+        ticketId,
+        resalePrice,
+        resaleDeadline
+      );
+
+      const receipt = await tx.wait();
+      
+      if (!receipt || receipt.status !== 1) {
+        throw new Error('Transaction failed');
+      }
+
+      logger.info(`Ticket listed for resale: ${ticketId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error listing ticket for resale:', {
+        message: error.message,
+        reason: error.reason,
+        code: error.code
+      });
+      throw error;
+    }
+  }
+
+  async buyResaleTicket(ticketId) {
+    try {
+      const ticket = await this.getTicketDetails(ticketId);
+      
+      if (!ticket.isForResale) {
+        throw new Error('Ticket is not for resale');
+      }
+
+      if (ticket.resaleDeadline && new Date(ticket.resaleDeadline) < new Date()) {
+        throw new Error('Resale deadline has passed');
+      }
+
+      const tx = await this.contract.buyResaleTicket(ticketId, { 
+        value: ticket.resalePrice 
+      });
+
+      const receipt = await tx.wait();
+      
+      if (!receipt || receipt.status !== 1) {
+        throw new Error('Transaction failed');
+      }
+
+      logger.info(`Resale ticket purchased: ${ticketId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error buying resale ticket:', {
+        message: error.message,
+        reason: error.reason,
+        code: error.code
+      });
+      throw error;
+    }
+  }
+
+  async cancelResaleListing(ticketId) {
+    try {
+      const tx = await this.contract.cancelResaleListing(ticketId);
+
+      const receipt = await tx.wait();
+      
+      if (!receipt || receipt.status !== 1) {
+        throw new Error('Transaction failed');
+      }
+
+      logger.info(`Resale listing cancelled: ${ticketId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error cancelling resale listing:', {
+        message: error.message,
+        reason: error.reason,
+        code: error.code
+      });
+      throw error;
+    }
+  }
+
+  async useTicket(ticketId, eventId, signature) {
+    try {
+      const tx = await this.contract.useTicket(ticketId, eventId, signature);
+
+      const receipt = await tx.wait();
+      
+      if (!receipt || receipt.status !== 1) {
+        throw new Error('Transaction failed');
+      }
+
+      logger.info(`Ticket used: ${ticketId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error using ticket:', {
+        message: error.message,
+        reason: error.reason,
+        code: error.code
+      });
+      throw error;
+    }
+  }
+
+  async getTicketDetails(ticketId) {
+    try {
+      const ticket = await this.readOnlyContract.getTicketDetails(ticketId);
+      return {
+        ticketId: ticket.ticketId.toString(),
+        eventId: ticket.eventId.toString(),
+        typeId: ticket.typeId.toString(),
+        currentOwner: ticket.currentOwner,
+        originalPrice: ticket.originalPrice.toString(),
+        isUsed: ticket.isUsed,
+        mintedAt: new Date(Number(ticket.mintedAt) * 1000),
+        usedAt: ticket.usedAt > 0 ? new Date(Number(ticket.usedAt) * 1000) : null,
+        isForResale: ticket.isForResale,
+        resalePrice: ticket.resalePrice.toString(),
+        resaleDeadline: ticket.resaleDeadline > 0 ? new Date(Number(ticket.resaleDeadline) * 1000) : null,
+        resaleCount: ticket.resaleCount,
+      };
+    } catch (error) {
+      logger.error('Error getting ticket details:', {
+        message: error.message,
+        ticketId
+      });
+      throw error;
+    }
+  }
+
+  async getUserTickets(walletAddress) {
+    try {
+      if (!ethers.isAddress(walletAddress)) {
+        throw new Error('Invalid wallet address');
+      }
+
+      const ticketIds = await this.readOnlyContract.getUserTickets(walletAddress);
+      return ticketIds.map(id => id.toString());
+    } catch (error) {
+      logger.error('Error getting user tickets:', {
+        message: error.message,
+        walletAddress
+      });
+      throw error;
+    }
+  }
+
+  async getUserEventTicketCount(walletAddress, eventId) {
+    try {
+      if (!ethers.isAddress(walletAddress)) {
+        throw new Error('Invalid wallet address');
+      }
+
+      const count = await this.readOnlyContract.getUserEventTicketCount(walletAddress, eventId);
+      return Number(count);
+    } catch (error) {
+      logger.error('Error getting user event ticket count:', {
+        message: error.message,
+        walletAddress,
+        eventId
+      });
+      throw error;
+    }
+  }
+
+  async getResaleTickets() {
+    try {
+      const ticketIds = await this.readOnlyContract.getResaleTickets();
+      return ticketIds.map(id => id.toString());
+    } catch (error) {
+      logger.error('Error getting resale tickets:', {
+        message: error.message
+      });
+      throw error;
+    }
+  }
+
+  async canResell(ticketId) {
+    try {
+      return await this.readOnlyContract.canResell(ticketId);
+    } catch (error) {
+      logger.error('Error checking resell eligibility:', {
+        message: error.message,
+        ticketId
+      });
+      throw error;
+    }
+  }
+
+  async getMaxResalePrice(ticketId) {
+    try {
+      const maxPrice = await this.readOnlyContract.getMaxResalePrice(ticketId);
+      return maxPrice.toString();
+    } catch (error) {
+      logger.error('Error getting max resale price:', {
+        message: error.message,
+        ticketId
+      });
+      throw error;
+    }
+  }
+
+  async getEventCreator(eventId) {
+    try {
+      return await this.readOnlyContract.getEventCreator(eventId);
+    } catch (error) {
+      logger.error('Error getting event creator:', {
+        message: error.message,
+        eventId
+      });
+      throw error;
+    }
+  }
+
+  async estimateGas(functionName, ...args) {
+    try {
+      const estimatedGas = await this.contract[functionName].estimateGas(...args);
+      return estimatedGas.toString();
+    } catch (error) {
+      logger.error('Error estimating gas:', {
+        message: error.message,
+        functionName
+      });
+      throw error;
+    }
+  }
+}
+
+module.exports = new BlockchainService();::::::::::::::
+src/services/eventService.js
+::::::::::::::
+const prisma = require('../config/database');
+const blockchainService = require('./blockchainService');
+
+class EventService {
+  async getAllEvents(filters = {}) {
+    const { status, location, search, sortBy = 'createdAt', order = 'desc' } = filters;
+
+    const where = {};
+
+    if (status) {
+      if (status === 'active') {
+        where.eventActive = true;
+        where.status = 'APPROVED';
+      } else if (status === 'done') {
+        where.eventDate = { lt: new Date() };
+      }
+    }
+
+    if (location) {
+      where.location = { contains: location, mode: 'insensitive' };
+    }
+
+    if (search) {
+      where.OR = [
+        { eventName: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } }
+      ];
+    }
+
+    const events = await prisma.event.findMany({
+      where,
+      include: {
+        creator: true,
+        ticketTypes: {
+          where: { active: true }
+        },
+        _count: {
+          select: { tickets: true }
+        }
+      },
+      orderBy: { [sortBy]: order }
+    });
+
+    return events.map(event => this.formatEventResponse(event));
+  }
+
+  async getEventById(eventId) {
+    const event = await prisma.event.findUnique({
+      where: { eventId: parseInt(eventId) },
+      include: {
+        creator: true,
+        ticketTypes: {
+          where: { active: true },
+          orderBy: { createdAt: 'asc' }
+        },
+        revenueShares: true,
+        _count: {
+          select: { tickets: true, favorites: true }
+        }
+      }
+    });
+
+    if (!event) {
+      throw new Error('Event not found');
+    }
+
+    return this.formatEventResponse(event);
+  }
+
+  async getEventsByCreator(creatorAddress) {
+    const events = await prisma.event.findMany({
+      where: { eventCreator: creatorAddress },
+      include: {
+        ticketTypes: {
+          where: { active: true }
+        },
+        _count: {
+          select: { tickets: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return events.map(event => this.formatEventResponse(event));
+  }
+
+  async getPendingEvents() {
+    const events = await prisma.event.findMany({
+      where: { status: 'PENDING' },
+      include: {
+        creator: true,
+        revenueShares: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return events;
+  }
+
+  async getEventStatistics(eventId) {
+    const event = await prisma.event.findUnique({
+      where: { eventId: parseInt(eventId) },
+      include: {
+        ticketTypes: true,
+        tickets: true,
+        transactions: {
+          where: { type: 'TICKET_PURCHASE' }
+        }
+      }
+    });
+
+    if (!event) {
+      throw new Error('Event not found');
+    }
+
+    const totalRevenue = event.transactions.reduce((sum, tx) => {
+      return sum + BigInt(tx.amount);
+    }, BigInt(0));
+
+    const ticketStats = event.ticketTypes.map(type => ({
+      typeName: type.typeName,
+      sold: type.sold,
+      totalSupply: type.totalSupply,
+      revenue: BigInt(type.price) * BigInt(type.sold)
+    }));
+
+    return {
+      eventId: event.eventId,
+      eventName: event.eventName,
+      totalTicketsSold: event.tickets.length,
+      totalRevenue: totalRevenue.toString(),
+      ticketStats,
+      activeListings: event.tickets.filter(t => t.isForResale).length,
+      usedTickets: event.tickets.filter(t => t.isUsed).length
+    };
+  }
+
+  async toggleFavorite(userId, eventId) {
+    const user = await prisma.user.findUnique({
+      where: { id: userId }
+    });
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    const existing = await prisma.favorite.findUnique({
+      where: {
+        userId_eventId: {
+          userId,
+          eventId: parseInt(eventId)
+        }
+      }
+    });
+
+    if (existing) {
+      await prisma.favorite.delete({
+        where: { id: existing.id }
+      });
+      return { favorited: false };
+    } else {
+      await prisma.favorite.create({
+        data: {
+          userId,
+          eventId: parseInt(eventId)
+        }
+      });
+      return { favorited: true };
+    }
+  }
+
+  async getUserFavorites(userId) {
+    const favorites = await prisma.favorite.findMany({
+      where: { userId },
+      include: {
+        event: {
+          include: {
+            ticketTypes: {
+              where: { active: true }
+            },
+            _count: {
+              select: { tickets: true }
+            }
+          }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return favorites.map(fav => this.formatEventResponse(fav.event));
+  }
+
+  formatEventResponse(event) {
+    const now = new Date();
+    const eventDate = new Date(event.eventDate);
+    
+    let ticketStatus = 'available';
+    if (event.ticketTypes && event.ticketTypes.length > 0) {
+      const availableTickets = event.ticketTypes.reduce((sum, type) => {
+        return sum + (type.totalSupply - type.sold);
+      }, 0);
+
+      const totalSupply = event.ticketTypes.reduce((sum, type) => {
+        return sum + type.totalSupply;
+      }, 0);
+
+      if (availableTickets === 0) {
+        ticketStatus = 'sold_out';
+      } else if (availableTickets / totalSupply < 0.1) {
+        ticketStatus = 'limited';
+      }
+    }
+
+    return {
+      eventId: event.eventId,
+      eventName: event.eventName,
+      eventURI: event.eventURI,
+      documentURI: event.documentURI,
+      description: event.description,
+      location: event.location,
+      eventDate: event.eventDate,
+      eventActive: event.eventActive,
+      status: event.status,
+      ticketStatus,
+      createdAt: event.createdAt,
+      approvedAt: event.approvedAt,
+      creator: event.creator ? {
+        address: event.creator.address,
+        role: event.creator.role
+      } : null,
+      ticketTypes: event.ticketTypes || [],
+      revenueShares: event.revenueShares || [],
+      totalTicketsSold: event._count?.tickets || 0,
+      totalFavorites: event._count?.favorites || 0,
+      isPast: eventDate < now
+    };
+  }
+}
+
+module.exports = new EventService();::::::::::::::
+src/services/indexerService.js
+::::::::::::::
+const { ethers } = require('ethers');
+const prisma = require('../config/database');
+const logger = require('../utils/logger');
+
+const EventChainABI = [
+  "event PlatformWalletUpdated(address indexed newWallet)",
+  "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
+  "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
+  "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
+  "event TicketListedForResale(uint256 indexed ticketId, uint256 indexed eventId, address indexed seller, uint256 resalePrice, uint256 deadline)",
+  "event TicketResold(uint256 indexed ticketId, uint256 indexed eventId, address indexed from, address to, uint256 price, uint256 taxAmount)",
+  "event ResaleListingCancelled(uint256 indexed ticketId, address indexed seller)",
+  "event TicketUsed(uint256 indexed ticketId, uint256 indexed eventId, address indexed user, uint256 timestamp)",
+  "event RevenueDistributed(uint256 indexed eventId, uint256 totalAmount, uint256 taxAmount, uint256 netAmount, uint256 timestamp)"
+];
+
+class IndexerService {
+  constructor() {
+    this.isRunning = false;
+    this.lastProcessedBlock = parseInt(process.env.START_BLOCK) || 0;
+    this.BATCH_SIZE = 1000;
+    this.RETRY_DELAY = 2000;
+    this.MAX_RETRIES = 3;
+    this.REQUEST_DELAY = 500;
+    
+    this.provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    this.contract = new ethers.Contract(
+      process.env.CONTRACT_ADDRESS,
+      EventChainABI,
+      this.provider
+    );
+  }
+
+  async start() {
+    if (this.isRunning) {
+      logger.info('Indexer already running');
+      return;
+    }
+
+    this.isRunning = true;
+    logger.info('🚀 Starting EventChain Indexer...');
+
+    await this.loadLastProcessedBlock();
+    await this.indexPastEvents();
+    this.startRealTimeIndexing();
+  }
+
+  async loadLastProcessedBlock() {
+    try {
+      const lastBlock = await prisma.transaction.findFirst({
+        orderBy: { blockNumber: 'desc' },
+        select: { blockNumber: true }
+      });
+
+      if (lastBlock && lastBlock.blockNumber) {
+        this.lastProcessedBlock = lastBlock.blockNumber;
+      }
+
+      logger.info(`Starting from block: ${this.lastProcessedBlock}`);
+    } catch (error) {
+      logger.error('Error loading last processed block:', error);
+    }
+  }
+
+  async delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async retryWithBackoff(fn, retries = this.MAX_RETRIES) {
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await fn();
+      } catch (error) {
+        if (i === retries - 1) throw error;
+        
+        const backoffDelay = this.RETRY_DELAY * Math.pow(2, i);
+        logger.warn(`Retry ${i + 1}/${retries} after ${backoffDelay}ms`);
+        await this.delay(backoffDelay);
+      }
+    }
+  }
+
+  async indexPastEvents() {
+    try {
+      const currentBlock = await this.retryWithBackoff(() => this.provider.getBlockNumber());
+      logger.info(`Indexing from block ${this.lastProcessedBlock} to ${currentBlock}`);
+
+      const events = [
+        'RevenueConfigured',
+        'TicketMinted',
+        'TicketsPurchased',
+        'TicketListedForResale',
+        'TicketResold',
+        'ResaleListingCancelled',
+        'TicketUsed',
+        'RevenueDistributed'
+      ];
+
+      for (const eventName of events) {
+        await this.indexEventInBatches(eventName, this.lastProcessedBlock, currentBlock);
+        await this.delay(this.REQUEST_DELAY);
+      }
+
+      this.lastProcessedBlock = currentBlock;
+      logger.info('✅ Past events indexed successfully');
+    } catch (error) {
+      logger.error('Error indexing past events:', error);
+    }
+  }
+
+  async indexEventInBatches(eventName, fromBlock, toBlock) {
+    logger.info(`Indexing ${eventName} from block ${fromBlock} to ${toBlock}`);
+    
+    let currentFrom = fromBlock;
+    
+    while (currentFrom < toBlock) {
+      const currentTo = Math.min(currentFrom + this.BATCH_SIZE, toBlock);
+      
+      try {
+        await this.retryWithBackoff(async () => {
+          const filter = this.contract.filters[eventName]();
+          const logs = await this.contract.queryFilter(filter, currentFrom, currentTo);
+          
+          for (const log of logs) {
+            await this.processEvent(eventName, log);
+          }
+        });
+        
+        logger.info(`Indexed ${eventName}: blocks ${currentFrom}-${currentTo}`);
+        currentFrom = currentTo + 1;
+        
+        await this.delay(this.REQUEST_DELAY);
+      } catch (error) {
+        logger.error(`Error indexing ${eventName} batch ${currentFrom}-${currentTo}:`, error);
+        await this.delay(this.RETRY_DELAY * 2);
+      }
+    }
+  }
+
+  startRealTimeIndexing() {
+    const events = [
+      'RevenueConfigured',
+      'TicketMinted',
+      'TicketsPurchased',
+      'TicketListedForResale',
+      'TicketResold',
+      'ResaleListingCancelled',
+      'TicketUsed',
+      'RevenueDistributed'
+    ];
+
+    events.forEach(eventName => {
+      this.contract.on(eventName, async (...args) => {
+        const event = args[args.length - 1];
+        try {
+          await this.retryWithBackoff(() => this.processEvent(eventName, event));
+        } catch (error) {
+          logger.error(`Error processing real-time ${eventName}:`, error);
+        }
+      });
+    });
+
+    logger.info('✅ Real-time indexing started');
+  }
+
+  async processEvent(eventName, log) {
+    try {
+      const block = await this.retryWithBackoff(() => log.getBlock());
+      
+      switch (eventName) {
+        case 'RevenueConfigured':
+          await this.handleRevenueConfigured(log, block);
+          break;
+        case 'TicketMinted':
+          await this.handleTicketMinted(log, block);
+          break;
+        case 'TicketsPurchased':
+          await this.handleTicketsPurchased(log, block);
+          break;
+        case 'TicketListedForResale':
+          await this.handleTicketListedForResale(log, block);
+          break;
+        case 'TicketResold':
+          await this.handleTicketResold(log, block);
+          break;
+        case 'ResaleListingCancelled':
+          await this.handleResaleListingCancelled(log, block);
+          break;
+        case 'TicketUsed':
+          await this.handleTicketUsed(log, block);
+          break;
+        case 'RevenueDistributed':
+          await this.handleRevenueDistributed(log, block);
+          break;
+      }
+
+      logger.info(`Processed ${eventName} - Block: ${block.number}`);
+    } catch (error) {
+      logger.error(`Error processing ${eventName}:`, error);
+    }
+  }
+
+  async handleRevenueConfigured(log, block) {
+    const [eventId, creator, taxWallet] = log.args;
+    
+    logger.info(`Revenue configured for event ${eventId}`);
+  }
+
+  async handleTicketMinted(log, block) {
+    const [ticketId, eventId, typeId, buyer, price] = log.args;
+
+    await prisma.user.upsert({
+      where: { walletAddress: buyer },
+      create: { walletAddress: buyer, role: 'USER' },
+      update: {}
+    });
+
+    await prisma.ticket.create({
+      data: {
+        ticketId: Number(ticketId),
+        eventId: String(eventId),
+        typeId: String(typeId),
+        ownerId: buyer,
+        txHash: log.transactionHash,
+        blockNumber: block.number,
+        originalPrice: price.toString(),
+        mintedAt: new Date(block.timestamp * 1000),
+        qrCode: `ticket-${ticketId}-${eventId}`
+      }
+    });
+  }
+
+  async handleTicketsPurchased(log, block) {
+    const [eventId, typeId, buyer, quantity, totalCost, taxAmount, ticketIds] = log.args;
+
+    const event = await prisma.event.findFirst({
+      where: { eventId: Number(eventId) }
+    });
+
+    if (!event) {
+      logger.warn(`Event ${eventId} not found in database`);
+      return;
+    }
+
+    await prisma.ticketType.updateMany({
+      where: {
+        eventId: event.id,
+        typeId: Number(typeId)
+      },
+      data: {
+        sold: { increment: Number(quantity) }
+      }
+    });
+
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: buyer }
+    });
+
+    await prisma.transaction.create({
+      data: {
+        txHash: log.transactionHash,
+        userId: user.id,
+        type: 'PURCHASE',
+        from: buyer,
+        to: process.env.CONTRACT_ADDRESS,
+        amount: totalCost.toString(),
+        eventId: event.id,
+        ticketIds: ticketIds.map(id => Number(id)),
+        blockNumber: block.number,
+        timestamp: new Date(block.timestamp * 1000)
+      }
+    });
+  }
+
+  async handleTicketListedForResale(log, block) {
+    const [ticketId, eventId, seller, resalePrice, deadline] = log.args;
+
+    await prisma.ticket.updateMany({
+      where: { ticketId: Number(ticketId) },
+      data: {
+        isForResale: true,
+        resalePrice: resalePrice.toString(),
+        resaleDeadline: new Date(Number(deadline) * 1000)
+      }
+    });
+  }
+
+  async handleTicketResold(log, block) {
+    const [ticketId, eventId, from, to, price, taxAmount] = log.args;
+
+    await prisma.user.upsert({
+      where: { walletAddress: to },
+      create: { walletAddress: to, role: 'USER' },
+      update: {}
+    });
+
+    const newOwner = await prisma.user.findUnique({
+      where: { walletAddress: to }
+    });
+
+    await prisma.ticket.updateMany({
+      where: { ticketId: Number(ticketId) },
+      data: {
+        ownerId: newOwner.id,
+        isForResale: false,
+        resalePrice: null,
+        resaleDeadline: null,
+        resaleCount: { increment: 1 }
+      }
+    });
+
+    const fromUser = await prisma.user.findUnique({
+      where: { walletAddress: from }
+    });
+
+    const ticket = await prisma.ticket.findFirst({
+      where: { ticketId: Number(ticketId) }
+    });
+
+    await prisma.transaction.create({
+      data: {
+        txHash: log.transactionHash,
+        userId: newOwner.id,
+        type: 'RESALE_BUY',
+        from: from,
+        to: to,
+        amount: price.toString(),
+        eventId: ticket.eventId,
+        ticketIds: [Number(ticketId)],
+        blockNumber: block.number,
+        timestamp: new Date(block.timestamp * 1000)
+      }
+    });
+  }
+
+  async handleResaleListingCancelled(log, block) {
+    const [ticketId, seller] = log.args;
+
+    await prisma.ticket.updateMany({
+      where: { ticketId: Number(ticketId) },
+      data: {
+        isForResale: false,
+        resalePrice: null,
+        resaleDeadline: null
+      }
+    });
+  }
+
+  async handleTicketUsed(log, block) {
+    const [ticketId, eventId, user, timestamp] = log.args;
+
+    await prisma.ticket.updateMany({
+      where: { ticketId: Number(ticketId) },
+      data: {
+        isUsed: true,
+        usedAt: new Date(Number(timestamp) * 1000)
+      }
+    });
+
+    const ticket = await prisma.ticket.findFirst({
+      where: { ticketId: Number(ticketId) },
+      include: { owner: true }
+    });
+
+    await prisma.transaction.create({
+      data: {
+        txHash: log.transactionHash,
+        userId: ticket.owner.id,
+        type: 'USE',
+        from: user,
+        to: process.env.CONTRACT_ADDRESS,
+        amount: '0',
+        eventId: ticket.eventId,
+        ticketIds: [Number(ticketId)],
+        blockNumber: block.number,
+        timestamp: new Date(block.timestamp * 1000)
+      }
+    });
+  }
+
+  async handleRevenueDistributed(log, block) {
+    const [eventId, totalAmount, taxAmount, netAmount, timestamp] = log.args;
+    
+    logger.info(`Revenue distributed for event ${eventId}: ${totalAmount}`);
+  }
+
+  stop() {
+    this.isRunning = false;
+    this.contract.removeAllListeners();
+    logger.info('Indexer stopped');
+  }
+}
+
+const indexer = new IndexerService();
+
+if (require.main === module) {
+  indexer.start().catch(console.error);
+}
+
+module.exports = indexer;::::::::::::::
+src/services/ticketService.js
+::::::::::::::
+const prisma = require('../config/database');
+const blockchainService = require('./blockchainService');
+
+class TicketService {
+  async getUserTickets(userAddress, filters = {}) {
+    const { status, eventId } = filters;
+
+    const where = {
+      currentOwner: userAddress
+    };
+
+    if (eventId) {
+      where.eventId = parseInt(eventId);
+    }
+
+    if (status === 'active') {
+      where.isUsed = false;
+      where.event = {
+        eventDate: { gt: new Date() }
+      };
+    } else if (status === 'used') {
+      where.isUsed = true;
+    } else if (status === 'past') {
+      where.event = {
+        eventDate: { lt: new Date() }
+      };
+    }
+
+    const tickets = await prisma.ticket.findMany({
+      where,
+      include: {
+        event: {
+          include: {
+            creator: true
+          }
+        },
+        ticketType: true
+      },
+      orderBy: { mintedAt: 'desc' }
+    });
+
+    return tickets.map(ticket => this.formatTicketResponse(ticket));
+  }
+
+  async getTicketById(ticketId) {
+    const ticket = await prisma.ticket.findUnique({
+      where: { ticketId: parseInt(ticketId) },
+      include: {
+        event: {
+          include: {
+            creator: true
+          }
+        },
+        ticketType: true,
+        transactions: {
+          orderBy: { timestamp: 'asc' }
+        }
+      }
+    });
+
+    if (!ticket) {
+      throw new Error('Ticket not found');
+    }
+
+    return this.formatTicketResponse(ticket);
+  }
+
+  async getResaleTickets(filters = {}) {
+    const { eventId, minPrice, maxPrice } = filters;
+
+    const where = {
+      isForResale: true,
+      resaleDeadline: { gt: new Date() }
+    };
+
+    if (eventId) {
+      where.eventId = parseInt(eventId);
+    }
+
+    if (minPrice) {
+      where.resalePrice = { gte: minPrice };
+    }
+
+    if (maxPrice) {
+      where.resalePrice = { lte: maxPrice };
+    }
+
+    const tickets = await prisma.ticket.findMany({
+      where,
+      include: {
+        event: {
+          include: {
+            creator: true
+          }
+        },
+        ticketType: true,
+        owner: true
+      },
+      orderBy: { resalePrice: 'asc' }
+    });
+
+    return tickets.map(ticket => this.formatTicketResponse(ticket));
+  }
+
+  async getTicketTransactionHistory(ticketId) {
+    const transactions = await prisma.transaction.findMany({
+      where: { ticketId: parseInt(ticketId) },
+      orderBy: { timestamp: 'asc' }
+    });
+
+    return transactions.map(tx => ({
+      txHash: tx.txHash,
+      type: tx.type,
+      from: tx.from,
+      to: tx.to,
+      amount: tx.amount,
+      timestamp: tx.timestamp,
+      blockNumber: tx.blockNumber
+    }));
+  }
+
+  async getUserTransactionHistory(userAddress, filters = {}) {
+    const { type, eventId } = filters;
+
+    const where = {
+      OR: [
+        { from: userAddress },
+        { to: userAddress }
+      ]
+    };
+
+    if (type) {
+      where.type = type;
+    }
+
+    if (eventId) {
+      where.eventId = parseInt(eventId);
+    }
+
+    const transactions = await prisma.transaction.findMany({
+      where,
+      include: {
+        event: true,
+        ticket: {
+          include: {
+            ticketType: true
+          }
+        }
+      },
+      orderBy: { timestamp: 'desc' }
+    });
+
+    return transactions.map(tx => ({
+      txHash: tx.txHash,
+      type: tx.type,
+      from: tx.from,
+      to: tx.to,
+      amount: tx.amount,
+      timestamp: tx.timestamp,
+      blockNumber: tx.blockNumber,
+      event: tx.event ? {
+        eventId: tx.event.eventId,
+        eventName: tx.event.eventName
+      } : null,
+      ticket: tx.ticket ? {
+        ticketId: tx.ticket.ticketId,
+        typeName: tx.ticket.ticketType?.typeName
+      } : null
+    }));
+  }
+
+  async checkPurchaseEligibility(userAddress, eventId, quantity) {
+    const currentPurchases = await prisma.ticket.count({
+      where: {
+        currentOwner: userAddress,
+        eventId: parseInt(eventId)
+      }
+    });
+
+    const maxAllowed = 5;
+    const remaining = maxAllowed - currentPurchases;
+
+    return {
+      canPurchase: remaining >= quantity,
+      currentPurchases,
+      maxAllowed,
+      remaining,
+      requestedQuantity: quantity
+    };
+  }
+
+  async getTicketTypeAvailability(eventId, typeId) {
+    const ticketType = await prisma.ticketType.findUnique({
+      where: {
+        eventId_typeId: {
+          eventId: parseInt(eventId),
+          typeId: parseInt(typeId)
+        }
+      }
+    });
+
+    if (!ticketType) {
+      throw new Error('Ticket type not found');
+    }
+
+    const available = ticketType.totalSupply - ticketType.sold;
+    const now = new Date();
+    const saleStarted = now >= ticketType.saleStartTime;
+    const saleEnded = now > ticketType.saleEndTime;
+
+    let status = 'available';
+    if (!saleStarted) {
+      status = 'not_started';
+    } else if (saleEnded) {
+      status = 'ended';
+    } else if (available === 0) {
+      status = 'sold_out';
+    } else if (available / ticketType.totalSupply < 0.1) {
+      status = 'limited';
+    }
+
+    return {
+      typeId: ticketType.typeId,
+      typeName: ticketType.typeName,
+      price: ticketType.price,
+      totalSupply: ticketType.totalSupply,
+      sold: ticketType.sold,
+      available,
+      status,
+      saleStartTime: ticketType.saleStartTime,
+      saleEndTime: ticketType.saleEndTime,
+      active: ticketType.active
+    };
+  }
+
+  formatTicketResponse(ticket) {
+    const canResell = ticket.resaleCount < 1 && !ticket.isUsed;
+    const maxResalePrice = canResell 
+      ? (BigInt(ticket.ticketType.price) * BigInt(120) / BigInt(100)).toString()
+      : null;
+
+    return {
+      ticketId: ticket.ticketId,
+      eventId: ticket.eventId,
+      typeId: ticket.typeId,
+      currentOwner: ticket.currentOwner,
+      isUsed: ticket.isUsed,
+      mintedAt: ticket.mintedAt,
+      usedAt: ticket.usedAt,
+      isForResale: ticket.isForResale,
+      resalePrice: ticket.resalePrice,
+      resaleDeadline: ticket.resaleDeadline,
+      resaleCount: ticket.resaleCount,
+      canResell,
+      maxResalePrice,
+      txHash: ticket.txHash,
+      event: ticket.event ? {
+        eventId: ticket.event.eventId,
+        eventName: ticket.event.eventName,
+        eventDate: ticket.event.eventDate,
+        location: ticket.event.location,
+        eventURI: ticket.event.eventURI,
+        creator: ticket.event.creator
+      } : null,
+      ticketType: ticket.ticketType ? {
+        typeId: ticket.ticketType.typeId,
+        typeName: ticket.ticketType.typeName,
+        price: ticket.ticketType.price,
+        description: ticket.ticketType.description
+      } : null,
+      transactions: ticket.transactions || []
+    };
+  }
+}
+
+module.exports = new TicketService();::::::::::::::
+src/utils/helpers.js
+::::::::::::::
+const { ethers } = require('ethers');
+
+const helpers = {
+    validateAddress(address) {
+        return ethers.isAddress(address);
+    },
+
+    formatEther(wei) {
+        return ethers.formatEther(wei);
+    },
+
+    parseEther(ether) {
+        return ethers.parseEther(ether.toString());
+    },
+
+    calculateMaxResalePrice(originalPrice) {
+        return (originalPrice * 120) / 100;
+    },
+
+    isValidDate(timestamp) {
+        return timestamp > Math.floor(Date.now() / 1000);
+    },
+
+    calculateRevenueShares(amount, percentages) {
+        return percentages.map(percentage => {
+            return (amount * percentage) / 10000;
+        });
+    }
+};
+
+module.exports = helpers;::::::::::::::
+src/utils/logger.js
+::::::::::::::
+const winston = require('winston');
+
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.json()
+    ),
+    transports: [
+        new winston.transports.File({ filename: 'error.log', level: 'error' }),
+        new winston.transports.File({ filename: 'combined.log' })
+    ]
+});
+
+if (process.env.NODE_ENV !== 'production') {
+    logger.add(new winston.transports.Console({
+        format: winston.format.simple()
+    }));
+}
+
+module.exports = logger;::::::::::::::
+src/utils/response.js
+::::::::::::::
+const successResponse = (res, data, message = 'Success') => {
+  return res.status(200).json({
+    success: true,
+    message,
+    data
+  });
+};
+
+const errorResponse = (res, message = 'Error', statusCode = 500) => {
+  return res.status(statusCode).json({
+    success: false,
+    message,
+    error: message
+  });
+};
+
+module.exports = {
+  successResponse,
+  errorResponse
+};

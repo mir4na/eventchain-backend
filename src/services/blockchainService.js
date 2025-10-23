@@ -1,154 +1,368 @@
-const { contract } = require('../config/blockchain');
 const { ethers } = require('ethers');
+const logger = require('../utils/logger');
+
+const EventChainABI = [
+  "function setPlatformWallet(address wallet) external",
+  "function setBackendSigner(address signer) external",
+  "function configureEvent(uint256 eventId, address eventCreator, address taxWallet) external returns (bool)",
+  "function setTicketTypePrice(uint256 eventId, uint256 typeId, uint256 price) external",
+  "function finalizeEvent(uint256 eventId) external",
+  "function buyTickets(uint256 eventId, uint256 typeId, uint256 quantity, address[] beneficiaries, uint256[] percentages) external payable returns (uint256[])",
+  "function listTicketForResale(uint256 ticketId, uint256 resalePrice, uint256 resaleDeadline) external",
+  "function buyResaleTicket(uint256 ticketId) external payable",
+  "function cancelResaleListing(uint256 ticketId) external",
+  "function useTicket(uint256 ticketId, uint256 eventId, uint256 nonce, uint256 deadline, bytes signature) external",
+  "function withdraw() external",
+  "function setTokenURI(uint256 ticketId, string uri) external",
+  "function getTicketDetails(uint256 ticketId) external view returns (tuple(uint256 ticketId, uint256 eventId, uint256 typeId, address currentOwner, uint256 originalPrice, bool isUsed, uint256 mintedAt, uint256 usedAt, bool isForResale, uint256 resalePrice, uint256 resaleDeadline, uint8 resaleCount))",
+  "function getResaleTickets() external view returns (uint256[])",
+  "function getUserTickets(address user) external view returns (uint256[])",
+  "function getUserEventTicketCount(address user, uint256 eventId) external view returns (uint256)",
+  "function getPendingWithdrawal(address user) external view returns (uint256)",
+  "function getTicketTypePrice(uint256 eventId, uint256 typeId) external view returns (uint256)",
+  "function canResell(uint256 ticketId) external view returns (bool)",
+  "function getMaxResalePrice(uint256 ticketId) external view returns (uint256)",
+  "function getEventCreator(uint256 eventId) external view returns (address)",
+  "function isEventFinalized(uint256 eventId) external view returns (bool)",
+  "event PlatformWalletUpdated(address indexed newWallet)",
+  "event BackendSignerUpdated(address indexed newSigner)",
+  "event EventFinalized(uint256 indexed eventId)",
+  "event TokenURIUpdated(uint256 indexed ticketId, string uri)",
+  "event TicketTypePriceSet(uint256 indexed eventId, uint256 indexed typeId, uint256 price)",
+  "event Withdrawn(address indexed user, uint256 amount)",
+  "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
+  "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
+  "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
+  "event TicketListedForResale(uint256 indexed ticketId, uint256 indexed eventId, address indexed seller, uint256 resalePrice, uint256 deadline)",
+  "event TicketResold(uint256 indexed ticketId, uint256 indexed eventId, address indexed from, address to, uint256 price, uint256 taxAmount)",
+  "event ResaleListingCancelled(uint256 indexed ticketId, address indexed seller)",
+  "event TicketUsed(uint256 indexed ticketId, uint256 indexed eventId, address indexed user, uint256 timestamp)",
+  "event RevenueDistributed(uint256 indexed eventId, uint256 totalAmount, uint256 taxAmount, uint256 netAmount, uint256 timestamp)"
+];
 
 class BlockchainService {
-  async getEventDetails(eventId) {
+  constructor() {
+    this.provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    this.wallet = new ethers.Wallet(process.env.PRIVATE_KEY, this.provider);
+    this.contract = new ethers.Contract(
+      process.env.CONTRACT_ADDRESS,
+      EventChainABI,
+      this.wallet
+    );
+    this.readOnlyContract = new ethers.Contract(
+      process.env.CONTRACT_ADDRESS,
+      EventChainABI,
+      this.provider
+    );
+  }
+
+  async configureEvent(eventId, eventCreator, taxWallet) {
     try {
-      const event = await contract.getEventDetails(eventId);
+      const tx = await this.contract.configureEvent(
+        eventId,
+        eventCreator,
+        taxWallet
+      );
+
+      const receipt = await tx.wait();
+      logger.info(`Event configured: ${eventId}. TxHash: ${receipt.hash}`);
+      
       return {
-        eventId: Number(event.eventId),
-        eventCreator: event.eventCreator,
-        eventName: event.eventName,
-        eventURI: event.eventURI,
-        documentURI: event.documentURI,
-        eventDate: Number(event.eventDate),
-        eventActive: event.eventActive,
-        status: Number(event.status),
-        createdAt: Number(event.createdAt),
-        approvedAt: Number(event.approvedAt)
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
       };
     } catch (error) {
-      throw new Error(`Failed to get event details: ${error.message}`);
+      logger.error('Error configuring event:', error);
+      throw error;
+    }
+  }
+
+  async setTicketTypePrice(eventId, typeId, price) {
+    try {
+      const priceInWei = ethers.parseEther(price.toString());
+      
+      const tx = await this.contract.setTicketTypePrice(
+        eventId,
+        typeId,
+        priceInWei
+      );
+
+      const receipt = await tx.wait();
+      logger.info(`Ticket type price set: Event ${eventId}, Type ${typeId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error setting ticket type price:', error);
+      throw error;
+    }
+  }
+
+  async finalizeEvent(eventId) {
+    try {
+      const tx = await this.contract.finalizeEvent(eventId);
+
+      const receipt = await tx.wait();
+      logger.info(`Event finalized: ${eventId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error finalizing event:', error);
+      throw error;
+    }
+  }
+
+  async buyTickets(eventId, typeId, quantity, beneficiaries, percentages, value) {
+    try {
+      const tx = await this.contract.buyTickets(
+        eventId,
+        typeId,
+        quantity,
+        beneficiaries,
+        percentages,
+        { value: value }
+      );
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error buying tickets:', error);
+      throw error;
+    }
+  }
+
+  async listTicketForResale(ticketId, resalePrice, resaleDeadline) {
+    try {
+      const tx = await this.contract.listTicketForResale(
+        ticketId,
+        resalePrice,
+        resaleDeadline
+      );
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error listing ticket for resale:', error);
+      throw error;
+    }
+  }
+
+  async buyResaleTicket(ticketId, value) {
+    try {
+      const tx = await this.contract.buyResaleTicket(ticketId, { value: value });
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error buying resale ticket:', error);
+      throw error;
+    }
+  }
+
+  async cancelResaleListing(ticketId) {
+    try {
+      const tx = await this.contract.cancelResaleListing(ticketId);
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error cancelling resale listing:', error);
+      throw error;
+    }
+  }
+
+  async useTicket(ticketId, eventId, nonce, deadline, signature) {
+    try {
+      const tx = await this.contract.useTicket(
+        ticketId,
+        eventId,
+        nonce,
+        deadline,
+        signature
+      );
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error using ticket:', error);
+      throw error;
+    }
+  }
+
+  async withdraw(userAddress) {
+    try {
+      const tx = await this.contract.withdraw();
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error withdrawing:', error);
+      throw error;
+    }
+  }
+
+  async setTokenURI(ticketId, uri) {
+    try {
+      const tx = await this.contract.setTokenURI(ticketId, uri);
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error setting token URI:', error);
+      throw error;
     }
   }
 
   async getTicketDetails(ticketId) {
     try {
-      const ticket = await contract.getTicketDetails(ticketId);
+      const ticket = await this.readOnlyContract.getTicketDetails(ticketId);
       return {
-        ticketId: Number(ticket.ticketId),
-        eventId: Number(ticket.eventId),
-        typeId: Number(ticket.typeId),
+        ticketId: ticket.ticketId.toString(),
+        eventId: ticket.eventId.toString(),
+        typeId: ticket.typeId.toString(),
         currentOwner: ticket.currentOwner,
+        originalPrice: ticket.originalPrice.toString(),
         isUsed: ticket.isUsed,
-        mintedAt: Number(ticket.mintedAt),
-        usedAt: Number(ticket.usedAt),
+        mintedAt: new Date(Number(ticket.mintedAt) * 1000),
+        usedAt: ticket.usedAt > 0 ? new Date(Number(ticket.usedAt) * 1000) : null,
         isForResale: ticket.isForResale,
         resalePrice: ticket.resalePrice.toString(),
-        resaleDeadline: Number(ticket.resaleDeadline),
-        resaleCount: Number(ticket.resaleCount)
+        resaleDeadline: ticket.resaleDeadline > 0 ? new Date(Number(ticket.resaleDeadline) * 1000) : null,
+        resaleCount: ticket.resaleCount,
       };
     } catch (error) {
-      throw new Error(`Failed to get ticket details: ${error.message}`);
+      logger.error('Error getting ticket details:', error);
+      throw error;
     }
   }
 
-  async getTicketType(eventId, typeId) {
+  async getUserTickets(walletAddress) {
     try {
-      const ticketType = await contract.getTicketType(eventId, typeId);
-      return {
-        typeId: Number(ticketType.typeId),
-        typeName: ticketType.typeName,
-        price: ticketType.price.toString(),
-        totalSupply: Number(ticketType.totalSupply),
-        sold: Number(ticketType.sold),
-        saleStartTime: Number(ticketType.saleStartTime),
-        saleEndTime: Number(ticketType.saleEndTime),
-        active: ticketType.active
-      };
+      const ticketIds = await this.readOnlyContract.getUserTickets(walletAddress);
+      return ticketIds.map(id => id.toString());
     } catch (error) {
-      throw new Error(`Failed to get ticket type: ${error.message}`);
+      logger.error('Error getting user tickets:', error);
+      throw error;
     }
   }
 
-  async getEventTicketTypes(eventId) {
+  async getUserEventTicketCount(walletAddress, eventId) {
     try {
-      const typeIds = await contract.getEventTicketTypes(eventId);
-      return typeIds.map(id => Number(id));
+      const count = await this.readOnlyContract.getUserEventTicketCount(walletAddress, eventId);
+      return Number(count);
     } catch (error) {
-      throw new Error(`Failed to get event ticket types: ${error.message}`);
-    }
-  }
-
-  async getRevenueShares(eventId) {
-    try {
-      const shares = await contract.getRevenueShares(eventId);
-      return shares.map(share => ({
-        beneficiary: share.beneficiary,
-        percentage: Number(share.percentage)
-      }));
-    } catch (error) {
-      throw new Error(`Failed to get revenue shares: ${error.message}`);
-    }
-  }
-
-  async getEOEvents(address) {
-    try {
-      const eventIds = await contract.getEOEvents(address);
-      return eventIds.map(id => Number(id));
-    } catch (error) {
-      throw new Error(`Failed to get EO events: ${error.message}`);
-    }
-  }
-
-  async getUserTickets(address) {
-    try {
-      const ticketIds = await contract.getUserTickets(address);
-      return ticketIds.map(id => Number(id));
-    } catch (error) {
-      throw new Error(`Failed to get user tickets: ${error.message}`);
+      logger.error('Error getting user event ticket count:', error);
+      throw error;
     }
   }
 
   async getResaleTickets() {
     try {
-      const ticketIds = await contract.getResaleTickets();
-      return ticketIds.map(id => Number(id));
+      const ticketIds = await this.readOnlyContract.getResaleTickets();
+      return ticketIds.map(id => id.toString());
     } catch (error) {
-      throw new Error(`Failed to get resale tickets: ${error.message}`);
-    }
-  }
-
-  async getUserPurchaseCount(address, eventId) {
-    try {
-      const count = await contract.getUserPurchaseCount(address, eventId);
-      return Number(count);
-    } catch (error) {
-      throw new Error(`Failed to get purchase count: ${error.message}`);
+      logger.error('Error getting resale tickets:', error);
+      throw error;
     }
   }
 
   async canResell(ticketId) {
     try {
-      return await contract.canResell(ticketId);
+      return await this.readOnlyContract.canResell(ticketId);
     } catch (error) {
-      throw new Error(`Failed to check resell eligibility: ${error.message}`);
+      logger.error('Error checking resell eligibility:', error);
+      throw error;
     }
   }
 
   async getMaxResalePrice(ticketId) {
     try {
-      const price = await contract.getMaxResalePrice(ticketId);
-      return price.toString();
+      const maxPrice = await this.readOnlyContract.getMaxResalePrice(ticketId);
+      return maxPrice.toString();
     } catch (error) {
-      throw new Error(`Failed to get max resale price: ${error.message}`);
+      logger.error('Error getting max resale price:', error);
+      throw error;
     }
   }
 
-  async isAdmin(address) {
+  async getEventCreator(eventId) {
     try {
-      return await contract.isAdmin(address);
+      return await this.readOnlyContract.getEventCreator(eventId);
     } catch (error) {
-      throw new Error(`Failed to check admin status: ${error.message}`);
+      logger.error('Error getting event creator:', error);
+      throw error;
     }
   }
 
-  async waitForTransaction(txHash) {
+  async isEventFinalized(eventId) {
     try {
-      const receipt = await contract.runner.provider.waitForTransaction(txHash);
-      return receipt;
+      return await this.readOnlyContract.isEventFinalized(eventId);
     } catch (error) {
-      throw new Error(`Transaction failed: ${error.message}`);
+      logger.error('Error checking event finalized:', error);
+      throw error;
+    }
+  }
+
+  async getPendingWithdrawal(address) {
+    try {
+      const amount = await this.readOnlyContract.getPendingWithdrawal(address);
+      return amount.toString();
+    } catch (error) {
+      logger.error('Error getting pending withdrawal:', error);
+      throw error;
+    }
+  }
+
+  async getTicketTypePrice(eventId, typeId) {
+    try {
+      const price = await this.readOnlyContract.getTicketTypePrice(eventId, typeId);
+      return ethers.formatEther(price);
+    } catch (error) {
+      logger.error('Error getting ticket type price:', error);
+      throw error;
     }
   }
 }

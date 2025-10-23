@@ -13,6 +13,8 @@ const eventRoutes = require('./routes/eventRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
 const userRoutes = require('./routes/userRoutes');
 const resaleRoutes = require('./routes/resaleRoutes');
+const authRoutes = require('./routes/authRoutes');
+const eoRoutes = require('./routes/eoRoutes');
 
 const indexer = require('./services/indexerService');
 
@@ -31,6 +33,8 @@ app.use('/api/events', eventRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/resale', resaleRoutes);
+app.use('/api/auth', authRoutes);
+app.use('/api/eo', eoRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
