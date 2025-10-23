@@ -1,163 +1,239 @@
-const { ethers } = require('ethers');
-const contractService = require('../services/blockchainService');
-const logger = require('../utils/logger');
+const { PrismaClient } = require('@prisma/client');
 const { successResponse, errorResponse } = require('../utils/response');
+const logger = require('../utils/logger');
 
-class AdminController {
-    async addAdmin(req, res) {
-        try {
-            const { adminAddress } = req.body;
+const prisma = new PrismaClient();
 
-            if (!ethers.isAddress(adminAddress)) {
-                return errorResponse(res, 400, 'Invalid Ethereum address');
-            }
+// Approve event
+const approveEvent = async (req, res) => {
+  try {
+    const { eventId } = req.params;
 
-            const contract = await contractService.getContract();
-            const tx = await contract.addAdmin(adminAddress);
-            await tx.wait();
+    const event = await prisma.event.findUnique({
+      where: { id: eventId }
+    });
 
-            logger.info(`New admin added: ${adminAddress}`);
-            return successResponse(res, 'Admin added successfully', { 
-                adminAddress,
-                txHash: tx.hash 
-            });
-        } catch (error) {
-            logger.error('Error adding admin:', error);
-            return errorResponse(res, 500, 'Failed to add admin');
-        }
+    if (!event) {
+      return errorResponse(res, 'Event not found', 404);
     }
 
-    async removeAdmin(req, res) {
-        try {
-            const { adminAddress } = req.body;
-
-            if (!ethers.isAddress(adminAddress)) {
-                return errorResponse(res, 400, 'Invalid Ethereum address');
-            }
-
-            const contract = await contractService.getContract();
-            const tx = await contract.removeAdmin(adminAddress);
-            await tx.wait();
-
-            logger.info(`Admin removed: ${adminAddress}`);
-            return successResponse(res, 'Admin removed successfully', {
-                adminAddress,
-                txHash: tx.hash
-            });
-        } catch (error) {
-            logger.error('Error removing admin:', error);
-            return errorResponse(res, 500, 'Failed to remove admin');
-        }
+    if (event.status !== 'PENDING') {
+      return errorResponse(res, 'Event already processed', 400);
     }
 
-    async approveEvent(req, res) {
-        try {
-            const { eventId } = req.params;
+    await prisma.event.update({
+      where: { id: eventId },
+      data: {
+        status: 'APPROVED',
+        approvedAt: new Date()
+      }
+    });
 
-            const contract = await contractService.getContract();
-            const tx = await contract.approveEvent(eventId);
-            await tx.wait();
+    logger.info(`Event approved: ${eventId}`);
 
-            logger.info(`Event approved: ${eventId}`);
-            return successResponse(res, 'Event approved successfully', {
-                eventId,
-                txHash: tx.hash
-            });
-        } catch (error) {
-            logger.error('Error approving event:', error);
-            return errorResponse(res, 500, 'Failed to approve event');
-        }
+    return successResponse(res, {
+      message: 'Event approved successfully'
+    });
+
+  } catch (error) {
+    logger.error('Error approving event:', error);
+    return errorResponse(res, 'Failed to approve event', 500);
+  }
+};
+
+// Reject event
+const rejectEvent = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+
+    const event = await prisma.event.findUnique({
+      where: { id: eventId }
+    });
+
+    if (!event) {
+      return errorResponse(res, 'Event not found', 404);
     }
 
-    async rejectEvent(req, res) {
-        try {
-            const { eventId } = req.params;
-
-            const contract = await contractService.getContract();
-            const tx = await contract.rejectEvent(eventId);
-            await tx.wait();
-
-            logger.info(`Event rejected: ${eventId}`);
-            return successResponse(res, 'Event rejected successfully', {
-                eventId,
-                txHash: tx.hash
-            });
-        } catch (error) {
-            logger.error('Error rejecting event:', error);
-            return errorResponse(res, 500, 'Failed to reject event');
-        }
+    if (event.status !== 'PENDING') {
+      return errorResponse(res, 'Event already processed', 400);
     }
 
-    async getAdminStats(req, res) {
-        try {
-            const contract = await contractService.getContract();
-            
-            const totalEvents = await contract._currentEventId();
-            
-            const totalTickets = await contract._currentTicketId();
+    await prisma.event.update({
+      where: { id: eventId },
+      data: {
+        status: 'REJECTED'
+      }
+    });
 
-            const recentEvents = [];
-            for (let i = totalEvents; i > Math.max(0, totalEvents - 10); i--) {
-                const event = await contract.getEventDetails(i);
-                recentEvents.push(event);
-            }
+    logger.info(`Event rejected: ${eventId}`);
 
-            return successResponse(res, 'Admin stats retrieved successfully', {
-                totalEvents: totalEvents.toString(),
-                totalTickets: totalTickets.toString(),
-                recentEvents
-            });
-        } catch (error) {
-            logger.error('Error getting admin stats:', error);
-            return errorResponse(res, 500, 'Failed to get admin stats');
-        }
+    return successResponse(res, {
+      message: 'Event rejected successfully'
+    });
+
+  } catch (error) {
+    logger.error('Error rejecting event:', error);
+    return errorResponse(res, 'Failed to reject event', 500);
+  }
+};
+
+// Get pending events
+const getPendingEvents = async (req, res) => {
+  try {
+    const events = await prisma.event.findMany({
+      where: { status: 'PENDING' },
+      include: {
+        creator: {
+          select: { address: true, role: true }
+        },
+        revenueShares: true
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return successResponse(res, { events });
+
+  } catch (error) {
+    logger.error('Error fetching pending events:', error);
+    return errorResponse(res, 'Failed to fetch pending events', 500);
+  }
+};
+
+// Get admin statistics
+const getAdminStats = async (req, res) => {
+  try {
+    const [
+      totalEvents,
+      pendingEvents,
+      approvedEvents,
+      rejectedEvents,
+      totalTickets,
+      totalRevenue,
+      totalUsers
+    ] = await Promise.all([
+      prisma.event.count(),
+      prisma.event.count({ where: { status: 'PENDING' } }),
+      prisma.event.count({ where: { status: 'APPROVED' } }),
+      prisma.event.count({ where: { status: 'REJECTED' } }),
+      prisma.ticket.count(),
+      prisma.transaction.aggregate({
+        where: { type: 'TICKET_PURCHASE' },
+        _sum: { amount: true }
+      }),
+      prisma.user.count()
+    ]);
+
+    const revenue = totalRevenue._sum.amount || '0';
+
+    return successResponse(res, {
+      events: {
+        total: totalEvents,
+        pending: pendingEvents,
+        approved: approvedEvents,
+        rejected: rejectedEvents
+      },
+      tickets: {
+        total: totalTickets
+      },
+      revenue: {
+        total: revenue
+      },
+      users: {
+        total: totalUsers
+      }
+    });
+
+  } catch (error) {
+    logger.error('Error fetching admin stats:', error);
+    return errorResponse(res, 'Failed to fetch admin statistics', 500);
+  }
+};
+
+// Add admin
+const addAdmin = async (req, res) => {
+  try {
+    const { adminAddress } = req.body;
+
+    const existingAdmin = await prisma.admin.findUnique({
+      where: { address: adminAddress }
+    });
+
+    if (existingAdmin) {
+      return errorResponse(res, 'Admin already exists', 400);
     }
 
-    async getPendingEvents(req, res) {
-        try {
-            const contract = await contractService.getContract();
-            const totalEvents = await contract._currentEventId();
-            
-            const pendingEvents = [];
-            for (let i = 1; i <= totalEvents; i++) {
-                const event = await contract.getEventDetails(i);
-                if (event.status === 0) { // Pending status
-                    pendingEvents.push({
-                        eventId: i,
-                        ...event
-                    });
-                }
-            }
+    await prisma.admin.create({
+      data: {
+        address: adminAddress,
+        addedBy: req.user.address,
+        addedAt: new Date()
+      }
+    });
 
-            return successResponse(res, 'Pending events retrieved successfully', {
-                pendingEvents
-            });
-        } catch (error) {
-            logger.error('Error getting pending events:', error);
-            return errorResponse(res, 500, 'Failed to get pending events');
-        }
+    logger.info(`Admin added: ${adminAddress} by ${req.user.address}`);
+
+    return successResponse(res, {
+      message: 'Admin added successfully'
+    });
+
+  } catch (error) {
+    logger.error('Error adding admin:', error);
+    return errorResponse(res, 'Failed to add admin', 500);
+  }
+};
+
+// Remove admin
+const removeAdmin = async (req, res) => {
+  try {
+    const { adminAddress } = req.params;
+
+    const admin = await prisma.admin.findUnique({
+      where: { address: adminAddress }
+    });
+
+    if (!admin) {
+      return errorResponse(res, 'Admin not found', 404);
     }
 
-    async verifyAdmin(req, res) {
-        try {
-            const { address } = req.params;
+    await prisma.admin.update({
+      where: { address: adminAddress },
+      data: { active: false }
+    });
 
-            if (!ethers.isAddress(address)) {
-                return errorResponse(res, 400, 'Invalid Ethereum address');
-            }
+    logger.info(`Admin removed: ${adminAddress} by ${req.user.address}`);
 
-            const contract = await contractService.getContract();
-            const isAdmin = await contract.isAdmin(address);
+    return successResponse(res, {
+      message: 'Admin removed successfully'
+    });
 
-            return successResponse(res, 'Admin verification completed', {
-                address,
-                isAdmin
-            });
-        } catch (error) {
-            logger.error('Error verifying admin:', error);
-            return errorResponse(res, 500, 'Failed to verify admin');
-        }
-    }
-}
+  } catch (error) {
+    logger.error('Error removing admin:', error);
+    return errorResponse(res, 'Failed to remove admin', 500);
+  }
+};
 
-module.exports = new AdminController();
+// Get all admins
+const getAdmins = async (req, res) => {
+  try {
+    const admins = await prisma.admin.findMany({
+      where: { active: true },
+      orderBy: { addedAt: 'desc' }
+    });
+
+    return successResponse(res, { admins });
+
+  } catch (error) {
+    logger.error('Error fetching admins:', error);
+    return errorResponse(res, 'Failed to fetch admins', 500);
+  }
+};
+
+module.exports = {
+  approveEvent,
+  rejectEvent,
+  getPendingEvents,
+  getAdminStats,
+  addAdmin,
+  removeAdmin,
+  getAdmins
+};

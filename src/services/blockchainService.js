@@ -1,154 +1,244 @@
-const { contract } = require('../config/blockchain');
 const { ethers } = require('ethers');
+const { CONTRACT_ADDRESS, RPC_URL } = require('../config/blockchain');
+
+const EVENT_TICKET_NFT_ABI = [
+  "function mintTicket(address to, uint256 eventId, uint256 typeId, uint256 originalPrice) external returns (uint256)",
+  "function listTicketForResale(uint256 ticketId, uint256 resalePrice, uint256 resaleDeadline) external",
+  "function buyResaleTicket(uint256 ticketId) external payable",
+  "function cancelResaleListing(uint256 ticketId) external",
+  "function useTicket(uint256 ticketId) external",
+  "function getTicketDetails(uint256 ticketId) external view returns (tuple(uint256 ticketId, uint256 eventId, uint256 typeId, address currentOwner, bool isUsed, uint256 mintedAt, uint256 usedAt, bool isForResale, uint256 resalePrice, uint256 resaleDeadline, uint8 resaleCount))",
+  "function getUserTickets(address user) external view returns (uint256[])",
+  "function getResaleTickets() external view returns (uint256[])",
+  "function canResell(uint256 ticketId) external view returns (bool)",
+  "function getMaxResalePrice(uint256 ticketId) external view returns (uint256)",
+  "function owner() external view returns (address)",
+  "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer)",
+  "event TicketTransferred(uint256 indexed ticketId, address from, address to)",
+  "event TicketUsed(uint256 indexed ticketId, uint256 indexed eventId, address user)",
+  "event TicketListedForResale(uint256 indexed ticketId, uint256 resalePrice, uint256 deadline)",
+  "event TicketResold(uint256 indexed ticketId, address from, address to, uint256 price)",
+  "event ResaleListingCancelled(uint256 indexed ticketId)"
+];
 
 class BlockchainService {
-  async getEventDetails(eventId) {
-    try {
-      const event = await contract.getEventDetails(eventId);
-      return {
-        eventId: Number(event.eventId),
-        eventCreator: event.eventCreator,
-        eventName: event.eventName,
-        eventURI: event.eventURI,
-        documentURI: event.documentURI,
-        eventDate: Number(event.eventDate),
-        eventActive: event.eventActive,
-        status: Number(event.status),
-        createdAt: Number(event.createdAt),
-        approvedAt: Number(event.approvedAt)
-      };
-    } catch (error) {
-      throw new Error(`Failed to get event details: ${error.message}`);
+  constructor() {
+    this.provider = null;
+    this.contract = null;
+    this.signer = null;
+  }
+
+  async connect() {
+    if (!this.provider) {
+      this.provider = new ethers.JsonRpcProvider(RPC_URL);
+      this.contract = new ethers.Contract(CONTRACT_ADDRESS, EVENT_TICKET_NFT_ABI, this.provider);
     }
   }
 
-  async getTicketDetails(ticketId) {
+  async connectWithSigner(privateKey) {
+    this.provider = new ethers.JsonRpcProvider(RPC_URL);
+    this.signer = new ethers.Wallet(privateKey, this.provider);
+    this.contract = new ethers.Contract(CONTRACT_ADDRESS, EVENT_TICKET_NFT_ABI, this.signer);
+  }
+
+  // Mint ticket (called by backend when user purchases)
+  async mintTicket(to, eventId, typeId, originalPrice) {
     try {
-      const ticket = await contract.getTicketDetails(ticketId);
+      await this.connectWithSigner(process.env.PRIVATE_KEY);
+      
+      const tx = await this.contract.mintTicket(
+        to,
+        eventId,
+        typeId,
+        ethers.parseEther(originalPrice.toString())
+      );
+      
+      const receipt = await tx.wait();
       return {
-        ticketId: Number(ticket.ticketId),
-        eventId: Number(ticket.eventId),
-        typeId: Number(ticket.typeId),
+        ticketId: receipt.logs[0].args.ticketId.toString(),
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber
+      };
+    } catch (error) {
+      throw new Error(`Failed to mint ticket: ${error.message}`);
+    }
+  }
+
+  // Get ticket information
+  async getTicketInfo(tokenId) {
+    try {
+      await this.connect();
+      const ticket = await this.contract.getTicketDetails(tokenId);
+      return {
+        ticketId: ticket.ticketId.toString(),
+        eventId: ticket.eventId.toString(),
+        typeId: ticket.typeId.toString(),
         currentOwner: ticket.currentOwner,
         isUsed: ticket.isUsed,
-        mintedAt: Number(ticket.mintedAt),
-        usedAt: Number(ticket.usedAt),
+        mintedAt: new Date(Number(ticket.mintedAt) * 1000),
+        usedAt: ticket.usedAt ? new Date(Number(ticket.usedAt) * 1000) : null,
         isForResale: ticket.isForResale,
-        resalePrice: ticket.resalePrice.toString(),
-        resaleDeadline: Number(ticket.resaleDeadline),
+        resalePrice: ticket.resalePrice ? ethers.formatEther(ticket.resalePrice) : null,
+        resaleDeadline: ticket.resaleDeadline ? new Date(Number(ticket.resaleDeadline) * 1000) : null,
         resaleCount: Number(ticket.resaleCount)
       };
     } catch (error) {
-      throw new Error(`Failed to get ticket details: ${error.message}`);
+      throw new Error(`Failed to get ticket info: ${error.message}`);
     }
   }
 
-  async getTicketType(eventId, typeId) {
+  // List ticket for resale
+  async listForResale(tokenId, resalePrice, resaleDeadline) {
     try {
-      const ticketType = await contract.getTicketType(eventId, typeId);
+      await this.connectWithSigner(process.env.PRIVATE_KEY);
+      
+      const tx = await this.contract.listTicketForResale(
+        tokenId,
+        ethers.parseEther(resalePrice.toString()),
+        Math.floor(resaleDeadline.getTime() / 1000)
+      );
+      
+      const receipt = await tx.wait();
       return {
-        typeId: Number(ticketType.typeId),
-        typeName: ticketType.typeName,
-        price: ticketType.price.toString(),
-        totalSupply: Number(ticketType.totalSupply),
-        sold: Number(ticketType.sold),
-        saleStartTime: Number(ticketType.saleStartTime),
-        saleEndTime: Number(ticketType.saleEndTime),
-        active: ticketType.active
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber
       };
     } catch (error) {
-      throw new Error(`Failed to get ticket type: ${error.message}`);
+      throw new Error(`Failed to list for resale: ${error.message}`);
     }
   }
 
-  async getEventTicketTypes(eventId) {
+  // Buy resale ticket
+  async buyResaleTicket(tokenId, price) {
     try {
-      const typeIds = await contract.getEventTicketTypes(eventId);
-      return typeIds.map(id => Number(id));
+      await this.connectWithSigner(process.env.PRIVATE_KEY);
+      
+      const tx = await this.contract.buyResaleTicket(tokenId, {
+        value: ethers.parseEther(price.toString())
+      });
+      
+      const receipt = await tx.wait();
+      return {
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber
+      };
     } catch (error) {
-      throw new Error(`Failed to get event ticket types: ${error.message}`);
+      throw new Error(`Failed to buy resale ticket: ${error.message}`);
     }
   }
 
-  async getRevenueShares(eventId) {
+  // Cancel resale listing
+  async cancelResaleListing(tokenId) {
     try {
-      const shares = await contract.getRevenueShares(eventId);
-      return shares.map(share => ({
-        beneficiary: share.beneficiary,
-        percentage: Number(share.percentage)
-      }));
+      await this.connectWithSigner(process.env.PRIVATE_KEY);
+      
+      const tx = await this.contract.cancelResaleListing(tokenId);
+      const receipt = await tx.wait();
+      return {
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber
+      };
     } catch (error) {
-      throw new Error(`Failed to get revenue shares: ${error.message}`);
+      throw new Error(`Failed to cancel resale listing: ${error.message}`);
     }
   }
 
-  async getEOEvents(address) {
+  // Use ticket (for event organizers)
+  async useTicket(tokenId) {
     try {
-      const eventIds = await contract.getEOEvents(address);
-      return eventIds.map(id => Number(id));
+      await this.connectWithSigner(process.env.PRIVATE_KEY);
+      
+      const tx = await this.contract.useTicket(tokenId);
+      const receipt = await tx.wait();
+      return {
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber
+      };
     } catch (error) {
-      throw new Error(`Failed to get EO events: ${error.message}`);
+      throw new Error(`Failed to use ticket: ${error.message}`);
     }
   }
 
-  async getUserTickets(address) {
+  // Check if ticket is used
+  async isTicketUsed(tokenId) {
     try {
-      const ticketIds = await contract.getUserTickets(address);
-      return ticketIds.map(id => Number(id));
+      const details = await this.getTicketInfo(tokenId);
+      return details.isUsed;
     } catch (error) {
-      throw new Error(`Failed to get user tickets: ${error.message}`);
+      throw new Error(`Failed to check ticket usage: ${error.message}`);
     }
   }
 
-  async getResaleTickets() {
+  // Check if ticket can be resold
+  async canResell(tokenId) {
     try {
-      const ticketIds = await contract.getResaleTickets();
-      return ticketIds.map(id => Number(id));
-    } catch (error) {
-      throw new Error(`Failed to get resale tickets: ${error.message}`);
-    }
-  }
-
-  async getUserPurchaseCount(address, eventId) {
-    try {
-      const count = await contract.getUserPurchaseCount(address, eventId);
-      return Number(count);
-    } catch (error) {
-      throw new Error(`Failed to get purchase count: ${error.message}`);
-    }
-  }
-
-  async canResell(ticketId) {
-    try {
-      return await contract.canResell(ticketId);
+      await this.connect();
+      return await this.contract.canResell(tokenId);
     } catch (error) {
       throw new Error(`Failed to check resell eligibility: ${error.message}`);
     }
   }
 
-  async getMaxResalePrice(ticketId) {
+  // Get maximum resale price
+  async getMaxResalePrice(tokenId) {
     try {
-      const price = await contract.getMaxResalePrice(ticketId);
-      return price.toString();
+      await this.connect();
+      const price = await this.contract.getMaxResalePrice(tokenId);
+      return ethers.formatEther(price);
     } catch (error) {
       throw new Error(`Failed to get max resale price: ${error.message}`);
     }
   }
 
-  async isAdmin(address) {
+  // Get ticket owner
+  async getTicketOwner(tokenId) {
     try {
-      return await contract.isAdmin(address);
+      const details = await this.getTicketInfo(tokenId);
+      return details.currentOwner;
     } catch (error) {
-      throw new Error(`Failed to check admin status: ${error.message}`);
+      throw new Error(`Failed to get ticket owner: ${error.message}`);
     }
   }
 
+  // Get token URI
+  async getTokenURI(tokenId) {
+    try {
+      await this.connect();
+      return await this.contract.tokenURI(tokenId);
+    } catch (error) {
+      throw new Error(`Failed to get token URI: ${error.message}`);
+    }
+  }
+
+  // Wait for transaction
   async waitForTransaction(txHash) {
     try {
-      const receipt = await contract.runner.provider.waitForTransaction(txHash);
-      return receipt;
+      await this.connect();
+      return await this.provider.waitForTransaction(txHash);
     } catch (error) {
       throw new Error(`Transaction failed: ${error.message}`);
+    }
+  }
+
+  // Get user tickets
+  async getUserTickets(address) {
+    try {
+      await this.connect();
+      const ticketIds = await this.contract.getUserTickets(address);
+      return ticketIds.map(id => id.toString());
+    } catch (error) {
+      throw new Error(`Failed to get user tickets: ${error.message}`);
+    }
+  }
+
+  // Get resale tickets
+  async getResaleTickets() {
+    try {
+      await this.connect();
+      const ticketIds = await this.contract.getResaleTickets();
+      return ticketIds.map(id => id.toString());
+    } catch (error) {
+      throw new Error(`Failed to get resale tickets: ${error.message}`);
     }
   }
 }
