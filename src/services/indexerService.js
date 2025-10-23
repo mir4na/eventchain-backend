@@ -3,7 +3,6 @@ const prisma = require('../config/database');
 const logger = require('../utils/logger');
 
 const EventChainABI = [
-  "event PlatformWalletUpdated(address indexed newWallet)",
   "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
   "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
   "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
@@ -210,17 +209,38 @@ class IndexerService {
     const [ticketId, eventId, typeId, buyer, price] = log.args;
 
     await prisma.user.upsert({
-      where: { walletAddress: buyer },
-      create: { walletAddress: buyer, role: 'USER' },
+      where: { walletAddress: buyer.toLowerCase() },
+      create: { walletAddress: buyer.toLowerCase(), role: 'USER' },
       update: {}
     });
+
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: buyer.toLowerCase() }
+    });
+
+    const event = await prisma.event.findFirst({
+      where: { eventId: Number(eventId) },
+      include: { ticketTypes: true }
+    });
+
+    if (!event) {
+      logger.warn(`Event ${eventId} not found in database`);
+      return;
+    }
+
+    const ticketType = event.ticketTypes.find(tt => tt.typeId === Number(typeId));
+
+    if (!ticketType) {
+      logger.warn(`TicketType ${typeId} not found for event ${eventId}`);
+      return;
+    }
 
     await prisma.ticket.create({
       data: {
         ticketId: Number(ticketId),
-        eventId: String(eventId),
-        typeId: String(typeId),
-        ownerId: buyer,
+        eventId: event.id,
+        typeId: ticketType.id,
+        ownerId: user.id,
         txHash: log.transactionHash,
         blockNumber: block.number,
         originalPrice: price.toString(),
@@ -234,7 +254,8 @@ class IndexerService {
     const [eventId, typeId, buyer, quantity, totalCost, taxAmount, ticketIds] = log.args;
 
     const event = await prisma.event.findFirst({
-      where: { eventId: Number(eventId) }
+      where: { eventId: Number(eventId) },
+      include: { ticketTypes: true }
     });
 
     if (!event) {
@@ -242,18 +263,19 @@ class IndexerService {
       return;
     }
 
-    await prisma.ticketType.updateMany({
-      where: {
-        eventId: event.id,
-        typeId: Number(typeId)
-      },
-      data: {
-        sold: { increment: Number(quantity) }
-      }
-    });
+    const ticketType = event.ticketTypes.find(tt => tt.typeId === Number(typeId));
+
+    if (ticketType) {
+      await prisma.ticketType.update({
+        where: { id: ticketType.id },
+        data: {
+          sold: { increment: Number(quantity) }
+        }
+      });
+    }
 
     const user = await prisma.user.findUnique({
-      where: { walletAddress: buyer }
+      where: { walletAddress: buyer.toLowerCase() }
     });
 
     await prisma.transaction.create({
@@ -261,11 +283,10 @@ class IndexerService {
         txHash: log.transactionHash,
         userId: user.id,
         type: 'PURCHASE',
-        from: buyer,
-        to: process.env.CONTRACT_ADDRESS,
+        from: buyer.toLowerCase(),
+        to: process.env.CONTRACT_ADDRESS.toLowerCase(),
         amount: totalCost.toString(),
         eventId: event.id,
-        ticketIds: ticketIds.map(id => Number(id)),
         blockNumber: block.number,
         timestamp: new Date(block.timestamp * 1000)
       }
@@ -289,13 +310,13 @@ class IndexerService {
     const [ticketId, eventId, from, to, price, taxAmount] = log.args;
 
     await prisma.user.upsert({
-      where: { walletAddress: to },
-      create: { walletAddress: to, role: 'USER' },
+      where: { walletAddress: to.toLowerCase() },
+      create: { walletAddress: to.toLowerCase(), role: 'USER' },
       update: {}
     });
 
     const newOwner = await prisma.user.findUnique({
-      where: { walletAddress: to }
+      where: { walletAddress: to.toLowerCase() }
     });
 
     await prisma.ticket.updateMany({
@@ -309,10 +330,6 @@ class IndexerService {
       }
     });
 
-    const fromUser = await prisma.user.findUnique({
-      where: { walletAddress: from }
-    });
-
     const ticket = await prisma.ticket.findFirst({
       where: { ticketId: Number(ticketId) }
     });
@@ -322,11 +339,11 @@ class IndexerService {
         txHash: log.transactionHash,
         userId: newOwner.id,
         type: 'RESALE_BUY',
-        from: from,
-        to: to,
+        from: from.toLowerCase(),
+        to: to.toLowerCase(),
         amount: price.toString(),
         eventId: ticket.eventId,
-        ticketIds: [Number(ticketId)],
+        ticketId: ticket.id,
         blockNumber: block.number,
         timestamp: new Date(block.timestamp * 1000)
       }
@@ -367,11 +384,11 @@ class IndexerService {
         txHash: log.transactionHash,
         userId: ticket.owner.id,
         type: 'USE',
-        from: user,
-        to: process.env.CONTRACT_ADDRESS,
+        from: user.toLowerCase(),
+        to: process.env.CONTRACT_ADDRESS.toLowerCase(),
         amount: '0',
         eventId: ticket.eventId,
-        ticketIds: [Number(ticketId)],
+        ticketId: ticket.id,
         blockNumber: block.number,
         timestamp: new Date(block.timestamp * 1000)
       }

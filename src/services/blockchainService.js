@@ -24,6 +24,8 @@ const EventChainABI = [
   "function getMaxResalePrice(uint256 ticketId) external view returns (uint256)",
   "function getEventCreator(uint256 eventId) external view returns (address)",
   "function isEventFinalized(uint256 eventId) external view returns (bool)",
+  "function platformWallet() external view returns (address)",
+  "function backendSigner() external view returns (address)",
   "event PlatformWalletUpdated(address indexed newWallet)",
   "event BackendSignerUpdated(address indexed newSigner)",
   "event EventFinalized(uint256 indexed eventId)",
@@ -54,6 +56,42 @@ class BlockchainService {
       EventChainABI,
       this.provider
     );
+  }
+
+  async verifyBackendSigner(expectedAddress) {
+    try {
+      const contractSigner = await this.readOnlyContract.backendSigner();
+      const match = contractSigner.toLowerCase() === expectedAddress.toLowerCase();
+      
+      if (!match) {
+        logger.error(`Backend signer mismatch! Contract: ${contractSigner}, Expected: ${expectedAddress}`);
+        return false;
+      }
+      
+      logger.info(`✅ Backend signer verified: ${contractSigner}`);
+      return true;
+    } catch (error) {
+      logger.error('Error verifying backend signer:', error);
+      return false;
+    }
+  }
+
+  async getBackendSigner() {
+    try {
+      return await this.readOnlyContract.backendSigner();
+    } catch (error) {
+      logger.error('Error getting backend signer:', error);
+      throw error;
+    }
+  }
+
+  async getPlatformWallet() {
+    try {
+      return await this.readOnlyContract.platformWallet();
+    } catch (error) {
+      logger.error('Error getting platform wallet:', error);
+      throw error;
+    }
   }
 
   async configureEvent(eventId, eventCreator, taxWallet) {
@@ -116,142 +154,6 @@ class BlockchainService {
       };
     } catch (error) {
       logger.error('Error finalizing event:', error);
-      throw error;
-    }
-  }
-
-  async buyTickets(eventId, typeId, quantity, beneficiaries, percentages, value) {
-    try {
-      const tx = await this.contract.buyTickets(
-        eventId,
-        typeId,
-        quantity,
-        beneficiaries,
-        percentages,
-        { value: value }
-      );
-
-      const receipt = await tx.wait();
-      
-      return {
-        success: true,
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-      };
-    } catch (error) {
-      logger.error('Error buying tickets:', error);
-      throw error;
-    }
-  }
-
-  async listTicketForResale(ticketId, resalePrice, resaleDeadline) {
-    try {
-      const tx = await this.contract.listTicketForResale(
-        ticketId,
-        resalePrice,
-        resaleDeadline
-      );
-
-      const receipt = await tx.wait();
-      
-      return {
-        success: true,
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-      };
-    } catch (error) {
-      logger.error('Error listing ticket for resale:', error);
-      throw error;
-    }
-  }
-
-  async buyResaleTicket(ticketId, value) {
-    try {
-      const tx = await this.contract.buyResaleTicket(ticketId, { value: value });
-
-      const receipt = await tx.wait();
-      
-      return {
-        success: true,
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-      };
-    } catch (error) {
-      logger.error('Error buying resale ticket:', error);
-      throw error;
-    }
-  }
-
-  async cancelResaleListing(ticketId) {
-    try {
-      const tx = await this.contract.cancelResaleListing(ticketId);
-
-      const receipt = await tx.wait();
-      
-      return {
-        success: true,
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-      };
-    } catch (error) {
-      logger.error('Error cancelling resale listing:', error);
-      throw error;
-    }
-  }
-
-  async useTicket(ticketId, eventId, nonce, deadline, signature) {
-    try {
-      const tx = await this.contract.useTicket(
-        ticketId,
-        eventId,
-        nonce,
-        deadline,
-        signature
-      );
-
-      const receipt = await tx.wait();
-      
-      return {
-        success: true,
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-      };
-    } catch (error) {
-      logger.error('Error using ticket:', error);
-      throw error;
-    }
-  }
-
-  async withdraw(userAddress) {
-    try {
-      const tx = await this.contract.withdraw();
-
-      const receipt = await tx.wait();
-      
-      return {
-        success: true,
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-      };
-    } catch (error) {
-      logger.error('Error withdrawing:', error);
-      throw error;
-    }
-  }
-
-  async setTokenURI(ticketId, uri) {
-    try {
-      const tx = await this.contract.setTokenURI(ticketId, uri);
-
-      const receipt = await tx.wait();
-      
-      return {
-        success: true,
-        txHash: receipt.hash,
-        blockNumber: receipt.blockNumber,
-      };
-    } catch (error) {
-      logger.error('Error setting token URI:', error);
       throw error;
     }
   }

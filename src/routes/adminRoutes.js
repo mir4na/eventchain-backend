@@ -1,17 +1,17 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
-const { auth } = require('../middleware/auth');
-const { validateAdmin } = require('../middleware/validation');
+const { authenticate, requireAdmin } = require('../middleware/auth');
 
-router.post('/add', auth, validateAdmin, adminController.addAdmin);
-router.post('/remove', auth, validateAdmin, adminController.removeAdmin);
+router.post('/add', authenticate, requireAdmin, adminController.addAdmin);
+router.post('/remove', authenticate, requireAdmin, adminController.removeAdmin);
+router.get('/verify/:address', adminController.verifyAdmin);
 
-router.post('/events/:eventId/approve', auth, validateAdmin, adminController.approveEvent);
-router.post('/events/:eventId/reject', auth, validateAdmin, adminController.rejectEvent);
+router.get('/proposals/pending', authenticate, requireAdmin, adminController.getPendingProposals);
+router.post('/proposals/:proposalId/approve', authenticate, requireAdmin, adminController.approveProposal);
+router.post('/proposals/:proposalId/reject', authenticate, requireAdmin, adminController.rejectProposal);
 
-router.get('/stats', auth, validateAdmin, adminController.getAdminStats);
-router.get('/events/pending', auth, validateAdmin, adminController.getPendingEvents);
-router.get('/verify/:address', auth, validateAdmin, adminController.verifyAdmin);
+router.get('/stats', authenticate, requireAdmin, adminController.getTransactionStats);
+router.get('/eos', authenticate, requireAdmin, adminController.getEventOrganizers);
 
 module.exports = router;

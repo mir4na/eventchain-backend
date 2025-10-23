@@ -58,7 +58,6 @@ class EOController {
           date: new Date(date),
           posterUrl,
           status: 'PENDING',
-          finalized: false,
           creatorId: user.id,
         }
       });
@@ -264,37 +263,6 @@ class EOController {
       return successResponse(res, ticketTypes, 'Ticket types retrieved successfully');
     } catch (error) {
       logger.error('Error getting ticket types:', error);
-      return errorResponse(res, error.message, 500);
-    }
-  }
-
-  async finalizeEvent(req, res) {
-    try {
-      const { eventId } = req.params;
-
-      const event = await prisma.event.findUnique({
-        where: { id: eventId }
-      });
-
-      if (!event) {
-        return errorResponse(res, 'Event not found', 404);
-      }
-
-      if (event.finalized) {
-        return errorResponse(res, 'Event already finalized', 400);
-      }
-
-      const result = await blockchainService.finalizeEvent(event.eventId);
-
-      await prisma.event.update({
-        where: { id: eventId },
-        data: { finalized: true }
-      });
-
-      logger.info(`Event finalized: ${eventId}`);
-      return successResponse(res, result, 'Event finalized successfully');
-    } catch (error) {
-      logger.error('Error finalizing event:', error);
       return errorResponse(res, error.message, 500);
     }
   }

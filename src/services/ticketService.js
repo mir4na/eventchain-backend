@@ -5,24 +5,32 @@ class TicketService {
   async getUserTickets(userAddress, filters = {}) {
     const { status, eventId } = filters;
 
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: userAddress.toLowerCase() }
+    });
+
+    if (!user) {
+      return [];
+    }
+
     const where = {
-      currentOwner: userAddress
+      ownerId: user.id
     };
 
     if (eventId) {
-      where.eventId = parseInt(eventId);
+      where.eventId = eventId;
     }
 
     if (status === 'active') {
       where.isUsed = false;
       where.event = {
-        eventDate: { gt: new Date() }
+        date: { gt: new Date() }
       };
     } else if (status === 'used') {
       where.isUsed = true;
     } else if (status === 'past') {
       where.event = {
-        eventDate: { lt: new Date() }
+        date: { lt: new Date() }
       };
     }
 
@@ -52,6 +60,7 @@ class TicketService {
           }
         },
         ticketType: true,
+        owner: true,
         transactions: {
           orderBy: { timestamp: 'asc' }
         }
@@ -74,7 +83,7 @@ class TicketService {
     };
 
     if (eventId) {
-      where.eventId = parseInt(eventId);
+      where.eventId = eventId;
     }
 
     if (minPrice) {
@@ -103,8 +112,16 @@ class TicketService {
   }
 
   async getTicketTransactionHistory(ticketId) {
+    const ticket = await prisma.ticket.findUnique({
+      where: { ticketId: parseInt(ticketId) }
+    });
+
+    if (!ticket) {
+      throw new Error('Ticket not found');
+    }
+
     const transactions = await prisma.transaction.findMany({
-      where: { ticketId: parseInt(ticketId) },
+      where: { ticketId: ticket.id },
       orderBy: { timestamp: 'asc' }
     });
 
@@ -122,11 +139,16 @@ class TicketService {
   async getUserTransactionHistory(userAddress, filters = {}) {
     const { type, eventId } = filters;
 
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: userAddress.toLowerCase() }
+    });
+
+    if (!user) {
+      return [];
+    }
+
     const where = {
-      OR: [
-        { from: userAddress },
-        { to: userAddress }
-      ]
+      userId: user.id
     };
 
     if (type) {
@@ -134,7 +156,7 @@ class TicketService {
     }
 
     if (eventId) {
-      where.eventId = parseInt(eventId);
+      where.eventId = eventId;
     }
 
     const transactions = await prisma.transaction.findMany({
@@ -160,20 +182,34 @@ class TicketService {
       blockNumber: tx.blockNumber,
       event: tx.event ? {
         eventId: tx.event.eventId,
-        eventName: tx.event.eventName
+        name: tx.event.name
       } : null,
       ticket: tx.ticket ? {
         ticketId: tx.ticket.ticketId,
-        typeName: tx.ticket.ticketType?.typeName
+        typeName: tx.ticket.ticketType?.name
       } : null
     }));
   }
 
   async checkPurchaseEligibility(userAddress, eventId, quantity) {
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: userAddress.toLowerCase() }
+    });
+
+    if (!user) {
+      return {
+        canPurchase: true,
+        currentPurchases: 0,
+        maxAllowed: 5,
+        remaining: 5,
+        requestedQuantity: quantity
+      };
+    }
+
     const currentPurchases = await prisma.ticket.count({
       where: {
-        currentOwner: userAddress,
-        eventId: parseInt(eventId)
+        ownerId: user.id,
+        eventId: eventId
       }
     });
 
@@ -190,12 +226,10 @@ class TicketService {
   }
 
   async getTicketTypeAvailability(eventId, typeId) {
-    const ticketType = await prisma.ticketType.findUnique({
+    const ticketType = await prisma.ticketType.findFirst({
       where: {
-        eventId_typeId: {
-          eventId: parseInt(eventId),
-          typeId: parseInt(typeId)
-        }
+        eventId: eventId,
+        typeId: parseInt(typeId)
       }
     });
 
@@ -203,10 +237,10 @@ class TicketService {
       throw new Error('Ticket type not found');
     }
 
-    const available = ticketType.totalSupply - ticketType.sold;
+    const available = ticketType.stock - ticketType.sold;
     const now = new Date();
-    const saleStarted = now >= ticketType.saleStartTime;
-    const saleEnded = now > ticketType.saleEndTime;
+    const saleStarted = now >= ticketType.saleStartDate;
+    const saleEnded = now > ticketType.saleEndDate;
 
     let status = 'available';
     if (!saleStarted) {
@@ -215,35 +249,35 @@ class TicketService {
       status = 'ended';
     } else if (available === 0) {
       status = 'sold_out';
-    } else if (available / ticketType.totalSupply < 0.1) {
+    } else if (available / ticketType.stock < 0.1) {
       status = 'limited';
     }
 
     return {
       typeId: ticketType.typeId,
-      typeName: ticketType.typeName,
+      name: ticketType.name,
       price: ticketType.price,
-      totalSupply: ticketType.totalSupply,
+      totalSupply: ticketType.stock,
       sold: ticketType.sold,
       available,
       status,
-      saleStartTime: ticketType.saleStartTime,
-      saleEndTime: ticketType.saleEndTime,
+      saleStartDate: ticketType.saleStartDate,
+      saleEndDate: ticketType.saleEndDate,
       active: ticketType.active
     };
   }
 
   formatTicketResponse(ticket) {
     const canResell = ticket.resaleCount < 1 && !ticket.isUsed;
-    const maxResalePrice = canResell 
+    const maxResalePrice = canResell && ticket.ticketType
       ? (BigInt(ticket.ticketType.price) * BigInt(120) / BigInt(100)).toString()
       : null;
 
     return {
       ticketId: ticket.ticketId,
-      eventId: ticket.eventId,
-      typeId: ticket.typeId,
-      currentOwner: ticket.currentOwner,
+      eventId: ticket.event?.eventId,
+      typeId: ticket.ticketType?.typeId,
+      currentOwner: ticket.owner?.walletAddress,
       isUsed: ticket.isUsed,
       mintedAt: ticket.mintedAt,
       usedAt: ticket.usedAt,
@@ -254,17 +288,18 @@ class TicketService {
       canResell,
       maxResalePrice,
       txHash: ticket.txHash,
+      qrCode: ticket.qrCode,
       event: ticket.event ? {
         eventId: ticket.event.eventId,
-        eventName: ticket.event.eventName,
-        eventDate: ticket.event.eventDate,
+        name: ticket.event.name,
+        date: ticket.event.date,
         location: ticket.event.location,
-        eventURI: ticket.event.eventURI,
+        posterUrl: ticket.event.posterUrl,
         creator: ticket.event.creator
       } : null,
       ticketType: ticket.ticketType ? {
         typeId: ticket.ticketType.typeId,
-        typeName: ticket.ticketType.typeName,
+        name: ticket.ticketType.name,
         price: ticket.ticketType.price,
         description: ticket.ticketType.description
       } : null,

@@ -1,5 +1,4 @@
 const prisma = require('../config/database');
-const blockchainService = require('./blockchainService');
 
 class EventService {
   async getAllEvents(filters = {}) {
@@ -9,10 +8,12 @@ class EventService {
 
     if (status) {
       if (status === 'active') {
-        where.eventActive = true;
-        where.status = 'APPROVED';
+        where.status = 'ACTIVE';
+        where.date = { gte: new Date() };
       } else if (status === 'done') {
-        where.eventDate = { lt: new Date() };
+        where.date = { lt: new Date() };
+      } else if (status === 'pending') {
+        where.status = 'PENDING';
       }
     }
 
@@ -22,7 +23,7 @@ class EventService {
 
     if (search) {
       where.OR = [
-        { eventName: { contains: search, mode: 'insensitive' } },
+        { name: { contains: search, mode: 'insensitive' } },
         { description: { contains: search, mode: 'insensitive' } }
       ];
     }
@@ -30,12 +31,17 @@ class EventService {
     const events = await prisma.event.findMany({
       where,
       include: {
-        creator: true,
+        creator: {
+          select: {
+            walletAddress: true,
+            name: true
+          }
+        },
         ticketTypes: {
           where: { active: true }
         },
         _count: {
-          select: { tickets: true }
+          select: { tickets: true, favorites: true }
         }
       },
       orderBy: { [sortBy]: order }
@@ -46,14 +52,21 @@ class EventService {
 
   async getEventById(eventId) {
     const event = await prisma.event.findUnique({
-      where: { eventId: parseInt(eventId) },
+      where: { id: eventId },
       include: {
-        creator: true,
+        creator: {
+          select: {
+            walletAddress: true,
+            name: true
+          }
+        },
         ticketTypes: {
           where: { active: true },
           orderBy: { createdAt: 'asc' }
         },
-        revenueShares: true,
+        proposals: {
+          where: { status: 'APPROVED' }
+        },
         _count: {
           select: { tickets: true, favorites: true }
         }
@@ -68,8 +81,16 @@ class EventService {
   }
 
   async getEventsByCreator(creatorAddress) {
+    const user = await prisma.user.findUnique({
+      where: { walletAddress: creatorAddress.toLowerCase() }
+    });
+
+    if (!user) {
+      return [];
+    }
+
     const events = await prisma.event.findMany({
-      where: { eventCreator: creatorAddress },
+      where: { creatorId: user.id },
       include: {
         ticketTypes: {
           where: { active: true }
@@ -84,27 +105,14 @@ class EventService {
     return events.map(event => this.formatEventResponse(event));
   }
 
-  async getPendingEvents() {
-    const events = await prisma.event.findMany({
-      where: { status: 'PENDING' },
-      include: {
-        creator: true,
-        revenueShares: true
-      },
-      orderBy: { createdAt: 'desc' }
-    });
-
-    return events;
-  }
-
   async getEventStatistics(eventId) {
     const event = await prisma.event.findUnique({
-      where: { eventId: parseInt(eventId) },
+      where: { id: eventId },
       include: {
         ticketTypes: true,
         tickets: true,
         transactions: {
-          where: { type: 'TICKET_PURCHASE' }
+          where: { type: 'PURCHASE' }
         }
       }
     });
@@ -118,15 +126,15 @@ class EventService {
     }, BigInt(0));
 
     const ticketStats = event.ticketTypes.map(type => ({
-      typeName: type.typeName,
+      typeName: type.name,
       sold: type.sold,
-      totalSupply: type.totalSupply,
-      revenue: BigInt(type.price) * BigInt(type.sold)
+      totalSupply: type.stock,
+      revenue: (BigInt(type.price) * BigInt(type.sold)).toString()
     }));
 
     return {
       eventId: event.eventId,
-      eventName: event.eventName,
+      name: event.name,
       totalTicketsSold: event.tickets.length,
       totalRevenue: totalRevenue.toString(),
       ticketStats,
@@ -136,19 +144,11 @@ class EventService {
   }
 
   async toggleFavorite(userId, eventId) {
-    const user = await prisma.user.findUnique({
-      where: { id: userId }
-    });
-
-    if (!user) {
-      throw new Error('User not found');
-    }
-
     const existing = await prisma.favorite.findUnique({
       where: {
         userId_eventId: {
           userId,
-          eventId: parseInt(eventId)
+          eventId
         }
       }
     });
@@ -162,7 +162,7 @@ class EventService {
       await prisma.favorite.create({
         data: {
           userId,
-          eventId: parseInt(eventId)
+          eventId
         }
       });
       return { favorited: true };
@@ -175,6 +175,12 @@ class EventService {
       include: {
         event: {
           include: {
+            creator: {
+              select: {
+                walletAddress: true,
+                name: true
+              }
+            },
             ticketTypes: {
               where: { active: true }
             },
@@ -192,16 +198,16 @@ class EventService {
 
   formatEventResponse(event) {
     const now = new Date();
-    const eventDate = new Date(event.eventDate);
+    const eventDate = new Date(event.date);
     
     let ticketStatus = 'available';
     if (event.ticketTypes && event.ticketTypes.length > 0) {
       const availableTickets = event.ticketTypes.reduce((sum, type) => {
-        return sum + (type.totalSupply - type.sold);
+        return sum + (type.stock - type.sold);
       }, 0);
 
       const totalSupply = event.ticketTypes.reduce((sum, type) => {
-        return sum + type.totalSupply;
+        return sum + type.stock;
       }, 0);
 
       if (availableTickets === 0) {
@@ -212,24 +218,23 @@ class EventService {
     }
 
     return {
+      id: event.id,
       eventId: event.eventId,
-      eventName: event.eventName,
-      eventURI: event.eventURI,
-      documentURI: event.documentURI,
+      name: event.name,
       description: event.description,
       location: event.location,
-      eventDate: event.eventDate,
-      eventActive: event.eventActive,
+      date: event.date,
+      posterUrl: event.posterUrl,
       status: event.status,
       ticketStatus,
       createdAt: event.createdAt,
-      approvedAt: event.approvedAt,
+      updatedAt: event.updatedAt,
       creator: event.creator ? {
-        address: event.creator.address,
-        role: event.creator.role
+        walletAddress: event.creator.walletAddress,
+        name: event.creator.name
       } : null,
       ticketTypes: event.ticketTypes || [],
-      revenueShares: event.revenueShares || [],
+      proposals: event.proposals || [],
       totalTicketsSold: event._count?.tickets || 0,
       totalFavorites: event._count?.favorites || 0,
       isPast: eventDate < now

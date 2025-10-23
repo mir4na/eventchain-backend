@@ -1,13 +1,16 @@
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
 
-const BACKEND_PRIVATE_KEY = process.env.BACKEND_SIGNER_PRIVATE_KEY || process.env.PRIVATE_KEY;
+const BACKEND_SIGNER_PRIVATE_KEY = process.env.BACKEND_SIGNER_PRIVATE_KEY;
 
-if (!BACKEND_PRIVATE_KEY) {
-  throw new Error('BACKEND_SIGNER_PRIVATE_KEY not configured');
+if (!BACKEND_SIGNER_PRIVATE_KEY) {
+  logger.error('BACKEND_SIGNER_PRIVATE_KEY not configured!');
+  throw new Error('BACKEND_SIGNER_PRIVATE_KEY must be set in environment variables');
 }
 
-const signer = new ethers.Wallet(BACKEND_PRIVATE_KEY);
+const signer = new ethers.Wallet(BACKEND_SIGNER_PRIVATE_KEY);
+
+logger.info(`Backend Signer Address: ${signer.address}`);
 
 async function generateTicketUseSignature(ticketId, eventId, scannerAddress, nonce, deadline) {
   try {
@@ -21,6 +24,7 @@ async function generateTicketUseSignature(ticketId, eventId, scannerAddress, non
     const messageBytes = ethers.getBytes(messageHash);
     const signature = await signer.signMessage(messageBytes);
     
+    logger.info(`Generated signature for ticket ${ticketId}, signer: ${signer.address}`);
     return signature;
   } catch (error) {
     logger.error('Error generating ticket use signature:', error);
@@ -40,7 +44,13 @@ async function verifyTicketUseSignature(ticketId, eventId, scannerAddress, nonce
     const messageBytes = ethers.getBytes(messageHash);
     const recoveredAddress = ethers.verifyMessage(messageBytes, signature);
     
-    return recoveredAddress.toLowerCase() === signer.address.toLowerCase();
+    const isValid = recoveredAddress.toLowerCase() === signer.address.toLowerCase();
+    
+    if (!isValid) {
+      logger.warn(`Signature verification failed. Expected: ${signer.address}, Got: ${recoveredAddress}`);
+    }
+    
+    return isValid;
   } catch (error) {
     logger.error('Error verifying signature:', error);
     return false;

@@ -1,4 +1,4 @@
-schema.prisma
+scheme.prisma
 
 datasource db {
   provider = "postgresql"
@@ -60,6 +60,7 @@ model Event {
   date        DateTime
   posterUrl   String?
   status      EventStatus @default(PENDING)
+  finalized   Boolean     @default(false)
   
   creatorId   String
   creator     User        @relation(fields: [creatorId], references: [id])
@@ -165,6 +166,7 @@ model Ticket {
   resaleCount       Int           @default(0)
   
   qrCode            String        @unique
+  tokenURI          String?
   
   mintedAt          DateTime
   usedAt            DateTime?
@@ -313,58 +315,6 @@ startServer();
 module.exports = app;
 
 ::::::::::::::
-src/config/blockchain.js
-::::::::::::::
-const { ethers } = require('ethers');
-
-const EventChainABI = [
-  "function setPlatformWallet(address wallet) external",
-  "function setBackendSigner(address signer) external",
-  "function configureEvent(uint256 eventId, address eventCreator, address taxWallet) external returns (bool)",
-  "function buyTickets(uint256 eventId, uint256 typeId, uint256 quantity, uint256 pricePerTicket, address[] calldata beneficiaries, uint256[] calldata percentages) external payable returns (uint256[])",
-  "function listTicketForResale(uint256 ticketId, uint256 resalePrice, uint256 resaleDeadline) external",
-  "function buyResaleTicket(uint256 ticketId) external payable",
-  "function cancelResaleListing(uint256 ticketId) external",
-  "function useTicket(uint256 ticketId, uint256 eventId, bytes calldata signature) external",
-  "function getTicketDetails(uint256 ticketId) external view returns (tuple(uint256 ticketId, uint256 eventId, uint256 typeId, address currentOwner, uint256 originalPrice, bool isUsed, uint256 mintedAt, uint256 usedAt, bool isForResale, uint256 resalePrice, uint256 resaleDeadline, uint8 resaleCount))",
-  "function getResaleTickets() external view returns (uint256[])",
-  "function getUserTickets(address user) external view returns (uint256[])",
-  "function getUserEventTicketCount(address user, uint256 eventId) external view returns (uint256)",
-  "function canResell(uint256 ticketId) external view returns (bool)",
-  "function getMaxResalePrice(uint256 ticketId) external view returns (uint256)",
-  "function getEventCreator(uint256 eventId) external view returns (address)",
-  "event PlatformWalletUpdated(address indexed newWallet)",
-  "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
-  "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
-  "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
-  "event TicketListedForResale(uint256 indexed ticketId, uint256 indexed eventId, address indexed seller, uint256 resalePrice, uint256 deadline)",
-  "event TicketResold(uint256 indexed ticketId, uint256 indexed eventId, address indexed from, address to, uint256 price, uint256 taxAmount)",
-  "event ResaleListingCancelled(uint256 indexed ticketId, address indexed seller)",
-  "event TicketUsed(uint256 indexed ticketId, uint256 indexed eventId, address indexed user, uint256 timestamp)",
-  "event RevenueDistributed(uint256 indexed eventId, uint256 totalAmount, uint256 taxAmount, uint256 netAmount, uint256 timestamp)"
-];
-
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-const contract = new ethers.Contract(
-  process.env.CONTRACT_ADDRESS,
-  EventChainABI,
-  wallet
-);
-
-const readOnlyContract = new ethers.Contract(
-  process.env.CONTRACT_ADDRESS,
-  EventChainABI,
-  provider
-);
-
-module.exports = {
-  provider,
-  wallet,
-  contract,
-  readOnlyContract,
-  EventChainABI
-};::::::::::::::
 src/config/database.js
 ::::::::::::::
 const { PrismaClient } = require('@prisma/client');
@@ -616,6 +566,70 @@ class AdminController {
       return errorResponse(res, 'Failed to fetch event organizers', 500);
     }
   }
+
+  async addAdmin(req, res) {
+    try {
+      const { address } = req.body;
+
+      if (!address) {
+        return errorResponse(res, 'Address is required', 400);
+      }
+
+      const admin = await prisma.admin.create({
+        data: {
+          address: address.toLowerCase(),
+          active: true
+        }
+      });
+
+      logger.info(`Admin added: ${address}`);
+      return successResponse(res, admin, 'Admin added successfully');
+    } catch (error) {
+      logger.error('Error adding admin:', error);
+      return errorResponse(res, 'Failed to add admin', 500);
+    }
+  }
+
+  async removeAdmin(req, res) {
+    try {
+      const { address } = req.body;
+
+      if (!address) {
+        return errorResponse(res, 'Address is required', 400);
+      }
+
+      await prisma.admin.update({
+        where: { address: address.toLowerCase() },
+        data: { active: false }
+      });
+
+      logger.info(`Admin removed: ${address}`);
+      return successResponse(res, null, 'Admin removed successfully');
+    } catch (error) {
+      logger.error('Error removing admin:', error);
+      return errorResponse(res, 'Failed to remove admin', 500);
+    }
+  }
+
+  async verifyAdmin(req, res) {
+    try {
+      const { address } = req.params;
+
+      const admin = await prisma.admin.findUnique({
+        where: { 
+          address: address.toLowerCase(),
+          active: true
+        }
+      });
+
+      return successResponse(res, { 
+        isAdmin: !!admin 
+      }, 'Admin verification completed');
+    } catch (error) {
+      logger.error('Error verifying admin:', error);
+      return errorResponse(res, 'Admin verification failed', 500);
+    }
+  }
 }
 
 module.exports = new AdminController();::::::::::::::
@@ -803,8 +817,9 @@ module.exports = new AuthController();::::::::::::::
 src/controllers/eoController.js
 ::::::::::::::
 const prisma = require('../config/database');
+const blockchainService = require('../services/blockchainService');
 const { successResponse, errorResponse } = require('../utils/response');
-const { generateTicketUseSignature } = require('../middleware/signature');
+const { generateTicketUseSignature, generateNonce, generateDeadline } = require('../middleware/signature');
 const logger = require('../utils/logger');
 const { ethers } = require('ethers');
 
@@ -830,35 +845,17 @@ class EOController {
         return errorResponse(res, 'Invalid creator address', 400);
       }
 
-      if (!revenueBeneficiaries || revenueBeneficiaries.length === 0) {
-        return errorResponse(res, 'At least one revenue beneficiary is required', 400);
-      }
-
-      if (revenueBeneficiaries.length > 10) {
-        return errorResponse(res, 'Maximum 10 beneficiaries allowed', 400);
-      }
-
-      const totalPercentage = revenueBeneficiaries.reduce((sum, b) => sum + b.percentage, 0);
-      if (totalPercentage !== 10000) {
-        return errorResponse(res, 'Revenue percentages must total 100% (10000 basis points)', 400);
-      }
-
-      for (const beneficiary of revenueBeneficiaries) {
-        if (!ethers.isAddress(beneficiary.address)) {
-          return errorResponse(res, `Invalid beneficiary address: ${beneficiary.address}`, 400);
+      if (revenueBeneficiaries && revenueBeneficiaries.length > 0) {
+        const totalPercentage = revenueBeneficiaries.reduce((sum, b) => sum + b.percentage, 0);
+        if (totalPercentage !== 10000) {
+          return errorResponse(res, 'Revenue percentages must total 100% (10000 basis points)', 400);
         }
-        if (beneficiary.percentage <= 0) {
-          return errorResponse(res, 'Beneficiary percentage must be greater than 0', 400);
+
+        for (const beneficiary of revenueBeneficiaries) {
+          if (!ethers.isAddress(beneficiary.address)) {
+            return errorResponse(res, `Invalid beneficiary address: ${beneficiary.address}`, 400);
+          }
         }
-      }
-
-      if (taxWalletAddress && !ethers.isAddress(taxWalletAddress)) {
-        return errorResponse(res, 'Invalid tax wallet address', 400);
-      }
-
-      const eventDate = new Date(date);
-      if (eventDate <= new Date()) {
-        return errorResponse(res, 'Event date must be in the future', 400);
       }
 
       await prisma.user.upsert({
@@ -876,9 +873,10 @@ class EOController {
           name,
           description,
           location,
-          date: eventDate,
+          date: new Date(date),
           posterUrl,
           status: 'PENDING',
+          finalized: false,
           creatorId: user.id,
         }
       });
@@ -887,7 +885,7 @@ class EOController {
         data: {
           eventId: event.id,
           creatorId: user.id,
-          revenueBeneficiaries: revenueBeneficiaries,
+          revenueBeneficiaries: revenueBeneficiaries || [],
           taxWalletAddress: taxWalletAddress || creatorAddress.toLowerCase(),
           status: 'PENDING'
         }
@@ -904,10 +902,6 @@ class EOController {
   async getEOEvents(req, res) {
     try {
       const { address } = req.params;
-
-      if (!ethers.isAddress(address)) {
-        return errorResponse(res, 'Invalid address', 400);
-      }
 
       const user = await prisma.user.findUnique({
         where: { walletAddress: address.toLowerCase() }
@@ -941,19 +935,7 @@ class EOController {
       const { eventId } = req.params;
       const { description, location, posterUrl } = req.body;
 
-      const event = await prisma.event.findUnique({
-        where: { id: eventId }
-      });
-
-      if (!event) {
-        return errorResponse(res, 'Event not found', 404);
-      }
-
-      if (event.status === 'ACTIVE') {
-        return errorResponse(res, 'Cannot update active event', 400);
-      }
-
-      const updatedEvent = await prisma.event.update({
+      const event = await prisma.event.update({
         where: { id: eventId },
         data: {
           description,
@@ -964,7 +946,7 @@ class EOController {
       });
 
       logger.info(`Event updated: ${eventId}`);
-      return successResponse(res, updatedEvent, 'Event updated successfully');
+      return successResponse(res, event, 'Event updated successfully');
     } catch (error) {
       logger.error('Error updating event:', error);
       return errorResponse(res, error.message, 500);
@@ -975,32 +957,13 @@ class EOController {
     try {
       const { eventId } = req.params;
 
-      const event = await prisma.event.findUnique({
-        where: { id: eventId },
-        include: {
-          tickets: {
-            where: {
-              isUsed: false
-            }
-          }
-        }
-      });
-
-      if (!event) {
-        return errorResponse(res, 'Event not found', 404);
-      }
-
-      if (event.tickets.length > 0) {
-        return errorResponse(res, 'Cannot deactivate event with unused tickets', 400);
-      }
-
-      const updatedEvent = await prisma.event.update({
+      const event = await prisma.event.update({
         where: { id: eventId },
         data: { status: 'ENDED' }
       });
 
       logger.info(`Event deactivated: ${eventId}`);
-      return successResponse(res, updatedEvent, 'Event deactivated successfully');
+      return successResponse(res, event, 'Event deactivated successfully');
     } catch (error) {
       logger.error('Error deactivating event:', error);
       return errorResponse(res, error.message, 500);
@@ -1020,26 +983,6 @@ class EOController {
         benefits
       } = req.body;
 
-      if (!name || !price || !stock || !saleStartDate || !saleEndDate) {
-        return errorResponse(res, 'Missing required fields', 400);
-      }
-
-      const parsedStock = parseInt(stock);
-      if (parsedStock <= 0) {
-        return errorResponse(res, 'Stock must be greater than 0', 400);
-      }
-
-      const startDate = new Date(saleStartDate);
-      const endDate = new Date(saleEndDate);
-      
-      if (startDate >= endDate) {
-        return errorResponse(res, 'Sale start date must be before end date', 400);
-      }
-
-      if (endDate <= new Date()) {
-        return errorResponse(res, 'Sale end date must be in the future', 400);
-      }
-
       const event = await prisma.event.findUnique({
         where: { id: eventId }
       });
@@ -1058,13 +1001,19 @@ class EOController {
           name,
           description,
           price,
-          stock: parsedStock,
+          stock: parseInt(stock),
           sold: 0,
-          saleStartDate: startDate,
-          saleEndDate: endDate,
+          saleStartDate: new Date(saleStartDate),
+          saleEndDate: new Date(saleEndDate),
           benefits: benefits || {}
         }
       });
+
+      await blockchainService.setTicketTypePrice(
+        event.eventId,
+        ticketType.typeId,
+        price
+      );
 
       await prisma.event.update({
         where: { id: eventId },
@@ -1086,39 +1035,32 @@ class EOController {
 
       const existingType = await prisma.ticketType.findUnique({
         where: { id: typeId },
-        include: {
-          event: true
-        }
+        include: { event: true }
       });
 
       if (!existingType) {
         return errorResponse(res, 'Ticket type not found', 404);
       }
 
-      if (existingType.event.status === 'ACTIVE') {
-        if (stock && parseInt(stock) < existingType.sold) {
-          return errorResponse(res, 'Cannot reduce stock below sold tickets', 400);
-        }
-      }
-
       const updateData = {};
-      
       if (price !== undefined) updateData.price = price;
       if (stock !== undefined) updateData.stock = parseInt(stock);
       if (saleStartDate !== undefined) updateData.saleStartDate = new Date(saleStartDate);
       if (saleEndDate !== undefined) updateData.saleEndDate = new Date(saleEndDate);
       if (benefits !== undefined) updateData.benefits = benefits;
 
-      if (updateData.saleStartDate && updateData.saleEndDate) {
-        if (updateData.saleStartDate >= updateData.saleEndDate) {
-          return errorResponse(res, 'Sale start date must be before end date', 400);
-        }
-      }
-
       const ticketType = await prisma.ticketType.update({
         where: { id: typeId },
         data: updateData
       });
+
+      if (price !== undefined) {
+        await blockchainService.setTicketTypePrice(
+          existingType.event.eventId,
+          existingType.typeId,
+          price
+        );
+      }
 
       logger.info(`Ticket type updated: ${typeId}`);
       return successResponse(res, ticketType, 'Ticket type updated successfully');
@@ -1140,6 +1082,37 @@ class EOController {
       return successResponse(res, ticketTypes, 'Ticket types retrieved successfully');
     } catch (error) {
       logger.error('Error getting ticket types:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async finalizeEvent(req, res) {
+    try {
+      const { eventId } = req.params;
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.finalized) {
+        return errorResponse(res, 'Event already finalized', 400);
+      }
+
+      const result = await blockchainService.finalizeEvent(event.eventId);
+
+      await prisma.event.update({
+        where: { id: eventId },
+        data: { finalized: true }
+      });
+
+      logger.info(`Event finalized: ${eventId}`);
+      return successResponse(res, result, 'Event finalized successfully');
+    } catch (error) {
+      logger.error('Error finalizing event:', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -1167,10 +1140,6 @@ class EOController {
           }
         }
       });
-
-      if (!event) {
-        return errorResponse(res, 'Event not found', 404);
-      }
 
       let revenueShares = [];
       if (event.proposals.length > 0) {
@@ -1257,10 +1226,6 @@ class EOController {
     try {
       const { address } = req.params;
 
-      if (!ethers.isAddress(address)) {
-        return errorResponse(res, 'Invalid address', 400);
-      }
-
       const user = await prisma.user.findUnique({
         where: { walletAddress: address.toLowerCase() }
       });
@@ -1319,10 +1284,15 @@ class EOController {
         return errorResponse(res, 'Ticket not found', 404);
       }
 
+      const nonce = generateNonce();
+      const deadline = generateDeadline(5);
+      
       const signature = await generateTicketUseSignature(
         ticket.ticketId,
         ticket.event.eventId,
-        req.body.scannerAddress || ticket.owner.walletAddress
+        req.body.scannerAddress || ticket.owner.walletAddress,
+        nonce,
+        deadline
       );
 
       const qrData = {
@@ -1333,6 +1303,8 @@ class EOController {
         currentOwner: ticket.owner.walletAddress,
         isUsed: ticket.isUsed,
         isValid: !ticket.isUsed && new Date(ticket.event.date) >= new Date(),
+        nonce,
+        deadline,
         signature
       };
 
@@ -1348,21 +1320,12 @@ class EOController {
       const { ticketId } = req.params;
       const { eventCreatorAddress, scannerAddress } = req.body;
 
-      if (!eventCreatorAddress || !ethers.isAddress(eventCreatorAddress)) {
-        return errorResponse(res, 'Valid event creator address required', 400);
-      }
-
-      if (scannerAddress && !ethers.isAddress(scannerAddress)) {
-        return errorResponse(res, 'Invalid scanner address', 400);
-      }
-
       const ticket = await prisma.ticket.findFirst({
         where: { ticketId: parseInt(ticketId) },
         include: { 
           event: {
             include: { creator: true }
-          },
-          owner: true
+          }
         }
       });
 
@@ -1370,7 +1333,7 @@ class EOController {
         return errorResponse(res, 'Ticket not found', 404);
       }
 
-      if (ticket.event.creator.walletAddress.toLowerCase() !== eventCreatorAddress.toLowerCase()) {
+      if (ticket.event.creator.walletAddress !== eventCreatorAddress.toLowerCase()) {
         return errorResponse(res, 'Unauthorized', 403);
       }
 
@@ -1378,16 +1341,23 @@ class EOController {
         return errorResponse(res, 'Ticket already used', 400);
       }
 
+      const nonce = generateNonce();
+      const deadline = generateDeadline(5);
+
       const signature = await generateTicketUseSignature(
         ticket.ticketId,
         ticket.event.eventId,
-        scannerAddress || ticket.owner.walletAddress
+        scannerAddress || ticket.owner.walletAddress,
+        nonce,
+        deadline
       );
 
       logger.info(`Ticket use signature generated for ticket ${ticketId}`);
       return successResponse(res, { 
         ticketId: ticket.ticketId,
         eventId: ticket.event.eventId,
+        nonce,
+        deadline,
         signature,
         message: 'Use this signature to call useTicket() on smart contract'
       }, 'Signature generated successfully');
@@ -1771,7 +1741,7 @@ src/middleware/signature.js
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
 
-const BACKEND_PRIVATE_KEY = process.env.BACKEND_SIGNER_PRIVATE_KEY;
+const BACKEND_PRIVATE_KEY = process.env.BACKEND_SIGNER_PRIVATE_KEY || process.env.PRIVATE_KEY;
 
 if (!BACKEND_PRIVATE_KEY) {
   throw new Error('BACKEND_SIGNER_PRIVATE_KEY not configured');
@@ -1779,13 +1749,13 @@ if (!BACKEND_PRIVATE_KEY) {
 
 const signer = new ethers.Wallet(BACKEND_PRIVATE_KEY);
 
-async function generateTicketUseSignature(ticketId, eventId, scannerAddress) {
+async function generateTicketUseSignature(ticketId, eventId, scannerAddress, nonce, deadline) {
   try {
     const chainId = parseInt(process.env.CHAIN_ID);
     
     const messageHash = ethers.solidityPackedKeccak256(
-      ['uint256', 'uint256', 'address', 'uint256'],
-      [ticketId, eventId, scannerAddress, chainId]
+      ['uint256', 'uint256', 'address', 'uint256', 'uint256', 'uint256'],
+      [ticketId, eventId, scannerAddress, nonce, deadline, chainId]
     );
 
     const messageBytes = ethers.getBytes(messageHash);
@@ -1798,13 +1768,13 @@ async function generateTicketUseSignature(ticketId, eventId, scannerAddress) {
   }
 }
 
-async function verifyTicketUseSignature(ticketId, eventId, scannerAddress, signature) {
+async function verifyTicketUseSignature(ticketId, eventId, scannerAddress, nonce, deadline, signature) {
   try {
     const chainId = parseInt(process.env.CHAIN_ID);
     
     const messageHash = ethers.solidityPackedKeccak256(
-      ['uint256', 'uint256', 'address', 'uint256'],
-      [ticketId, eventId, scannerAddress, chainId]
+      ['uint256', 'uint256', 'address', 'uint256', 'uint256', 'uint256'],
+      [ticketId, eventId, scannerAddress, nonce, deadline, chainId]
     );
 
     const messageBytes = ethers.getBytes(messageHash);
@@ -1817,9 +1787,19 @@ async function verifyTicketUseSignature(ticketId, eventId, scannerAddress, signa
   }
 }
 
+function generateNonce() {
+  return Math.floor(Math.random() * 1000000000);
+}
+
+function generateDeadline(minutesFromNow = 5) {
+  return Math.floor(Date.now() / 1000) + (minutesFromNow * 60);
+}
+
 module.exports = {
   generateTicketUseSignature,
   verifyTicketUseSignature,
+  generateNonce,
+  generateDeadline,
   signerAddress: signer.address
 };::::::::::::::
 src/middleware/validation.js
@@ -2016,19 +1996,31 @@ const EventChainABI = [
   "function setPlatformWallet(address wallet) external",
   "function setBackendSigner(address signer) external",
   "function configureEvent(uint256 eventId, address eventCreator, address taxWallet) external returns (bool)",
-  "function buyTickets(uint256 eventId, uint256 typeId, uint256 quantity, uint256 pricePerTicket, address[] calldata beneficiaries, uint256[] calldata percentages) external payable returns (uint256[])",
+  "function setTicketTypePrice(uint256 eventId, uint256 typeId, uint256 price) external",
+  "function finalizeEvent(uint256 eventId) external",
+  "function buyTickets(uint256 eventId, uint256 typeId, uint256 quantity, address[] beneficiaries, uint256[] percentages) external payable returns (uint256[])",
   "function listTicketForResale(uint256 ticketId, uint256 resalePrice, uint256 resaleDeadline) external",
   "function buyResaleTicket(uint256 ticketId) external payable",
   "function cancelResaleListing(uint256 ticketId) external",
-  "function useTicket(uint256 ticketId, uint256 eventId, bytes calldata signature) external",
+  "function useTicket(uint256 ticketId, uint256 eventId, uint256 nonce, uint256 deadline, bytes signature) external",
+  "function withdraw() external",
+  "function setTokenURI(uint256 ticketId, string uri) external",
   "function getTicketDetails(uint256 ticketId) external view returns (tuple(uint256 ticketId, uint256 eventId, uint256 typeId, address currentOwner, uint256 originalPrice, bool isUsed, uint256 mintedAt, uint256 usedAt, bool isForResale, uint256 resalePrice, uint256 resaleDeadline, uint8 resaleCount))",
   "function getResaleTickets() external view returns (uint256[])",
   "function getUserTickets(address user) external view returns (uint256[])",
   "function getUserEventTicketCount(address user, uint256 eventId) external view returns (uint256)",
+  "function getPendingWithdrawal(address user) external view returns (uint256)",
+  "function getTicketTypePrice(uint256 eventId, uint256 typeId) external view returns (uint256)",
   "function canResell(uint256 ticketId) external view returns (bool)",
   "function getMaxResalePrice(uint256 ticketId) external view returns (uint256)",
   "function getEventCreator(uint256 eventId) external view returns (address)",
+  "function isEventFinalized(uint256 eventId) external view returns (bool)",
   "event PlatformWalletUpdated(address indexed newWallet)",
+  "event BackendSignerUpdated(address indexed newSigner)",
+  "event EventFinalized(uint256 indexed eventId)",
+  "event TokenURIUpdated(uint256 indexed ticketId, string uri)",
+  "event TicketTypePriceSet(uint256 indexed eventId, uint256 indexed typeId, uint256 price)",
+  "event Withdrawn(address indexed user, uint256 amount)",
   "event RevenueConfigured(uint256 indexed eventId, address indexed creator, address indexed taxWallet)",
   "event TicketMinted(uint256 indexed ticketId, uint256 indexed eventId, uint256 indexed typeId, address buyer, uint256 price)",
   "event TicketsPurchased(uint256 indexed eventId, uint256 indexed typeId, address indexed buyer, uint256 quantity, uint256 totalCost, uint256 taxAmount, uint256[] ticketIds)",
@@ -2057,13 +2049,6 @@ class BlockchainService {
 
   async configureEvent(eventId, eventCreator, taxWallet) {
     try {
-      if (!ethers.isAddress(eventCreator)) {
-        throw new Error('Invalid event creator address');
-      }
-      if (!ethers.isAddress(taxWallet)) {
-        throw new Error('Invalid tax wallet address');
-      }
-
       const tx = await this.contract.configureEvent(
         eventId,
         eventCreator,
@@ -2071,11 +2056,6 @@ class BlockchainService {
       );
 
       const receipt = await tx.wait();
-      
-      if (!receipt || receipt.status !== 1) {
-        throw new Error('Transaction failed');
-      }
-
       logger.info(`Event configured: ${eventId}. TxHash: ${receipt.hash}`);
       
       return {
@@ -2084,91 +2064,79 @@ class BlockchainService {
         blockNumber: receipt.blockNumber,
       };
     } catch (error) {
-      logger.error('Error configuring event:', {
-        message: error.message,
-        reason: error.reason,
-        code: error.code
-      });
+      logger.error('Error configuring event:', error);
       throw error;
     }
   }
 
-  async buyTickets(eventId, typeId, quantity, pricePerTicket, beneficiaries, percentages) {
+  async setTicketTypePrice(eventId, typeId, price) {
     try {
-      if (beneficiaries.length !== percentages.length) {
-        throw new Error('Beneficiaries and percentages length mismatch');
-      }
-
-      const totalPercentage = percentages.reduce((sum, p) => sum + p, 0);
-      if (totalPercentage !== 10000) {
-        throw new Error('Total percentages must equal 10000 (100%)');
-      }
-
-      beneficiaries.forEach(addr => {
-        if (!ethers.isAddress(addr)) {
-          throw new Error(`Invalid beneficiary address: ${addr}`);
-        }
-      });
-
-      const totalCost = BigInt(pricePerTicket) * BigInt(quantity);
-
-      const tx = await this.contract.buyTickets(
+      const priceInWei = ethers.parseEther(price.toString());
+      
+      const tx = await this.contract.setTicketTypePrice(
         eventId,
         typeId,
-        quantity,
-        pricePerTicket,
-        beneficiaries,
-        percentages,
-        { value: totalCost }
+        priceInWei
       );
 
       const receipt = await tx.wait();
-      
-      if (!receipt || receipt.status !== 1) {
-        throw new Error('Transaction failed');
-      }
-
-      const ticketIds = [];
-      for (const log of receipt.logs) {
-        try {
-          const parsed = this.contract.interface.parseLog(log);
-          if (parsed && parsed.name === 'TicketMinted') {
-            ticketIds.push(parsed.args.ticketId.toString());
-          }
-        } catch (e) {
-          continue;
-        }
-      }
-
-      logger.info(`Tickets purchased: ${ticketIds.length} tickets. TxHash: ${receipt.hash}`);
+      logger.info(`Ticket type price set: Event ${eventId}, Type ${typeId}. TxHash: ${receipt.hash}`);
       
       return {
         success: true,
         txHash: receipt.hash,
         blockNumber: receipt.blockNumber,
-        ticketIds
       };
     } catch (error) {
-      logger.error('Error buying tickets:', {
-        message: error.message,
-        reason: error.reason,
-        code: error.code
-      });
+      logger.error('Error setting ticket type price:', error);
+      throw error;
+    }
+  }
+
+  async finalizeEvent(eventId) {
+    try {
+      const tx = await this.contract.finalizeEvent(eventId);
+
+      const receipt = await tx.wait();
+      logger.info(`Event finalized: ${eventId}. TxHash: ${receipt.hash}`);
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error finalizing event:', error);
+      throw error;
+    }
+  }
+
+  async buyTickets(eventId, typeId, quantity, beneficiaries, percentages, value) {
+    try {
+      const tx = await this.contract.buyTickets(
+        eventId,
+        typeId,
+        quantity,
+        beneficiaries,
+        percentages,
+        { value: value }
+      );
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error buying tickets:', error);
       throw error;
     }
   }
 
   async listTicketForResale(ticketId, resalePrice, resaleDeadline) {
     try {
-      const maxPrice = await this.getMaxResalePrice(ticketId);
-      if (BigInt(resalePrice) > BigInt(maxPrice)) {
-        throw new Error(`Resale price exceeds maximum allowed: ${maxPrice}`);
-      }
-
-      if (resaleDeadline <= Math.floor(Date.now() / 1000)) {
-        throw new Error('Resale deadline must be in the future');
-      }
-
       const tx = await this.contract.listTicketForResale(
         ticketId,
         resalePrice,
@@ -2177,50 +2145,22 @@ class BlockchainService {
 
       const receipt = await tx.wait();
       
-      if (!receipt || receipt.status !== 1) {
-        throw new Error('Transaction failed');
-      }
-
-      logger.info(`Ticket listed for resale: ${ticketId}. TxHash: ${receipt.hash}`);
-      
       return {
         success: true,
         txHash: receipt.hash,
         blockNumber: receipt.blockNumber,
       };
     } catch (error) {
-      logger.error('Error listing ticket for resale:', {
-        message: error.message,
-        reason: error.reason,
-        code: error.code
-      });
+      logger.error('Error listing ticket for resale:', error);
       throw error;
     }
   }
 
-  async buyResaleTicket(ticketId) {
+  async buyResaleTicket(ticketId, value) {
     try {
-      const ticket = await this.getTicketDetails(ticketId);
-      
-      if (!ticket.isForResale) {
-        throw new Error('Ticket is not for resale');
-      }
-
-      if (ticket.resaleDeadline && new Date(ticket.resaleDeadline) < new Date()) {
-        throw new Error('Resale deadline has passed');
-      }
-
-      const tx = await this.contract.buyResaleTicket(ticketId, { 
-        value: ticket.resalePrice 
-      });
+      const tx = await this.contract.buyResaleTicket(ticketId, { value: value });
 
       const receipt = await tx.wait();
-      
-      if (!receipt || receipt.status !== 1) {
-        throw new Error('Transaction failed');
-      }
-
-      logger.info(`Resale ticket purchased: ${ticketId}. TxHash: ${receipt.hash}`);
       
       return {
         success: true,
@@ -2228,11 +2168,7 @@ class BlockchainService {
         blockNumber: receipt.blockNumber,
       };
     } catch (error) {
-      logger.error('Error buying resale ticket:', {
-        message: error.message,
-        reason: error.reason,
-        code: error.code
-      });
+      logger.error('Error buying resale ticket:', error);
       throw error;
     }
   }
@@ -2243,38 +2179,28 @@ class BlockchainService {
 
       const receipt = await tx.wait();
       
-      if (!receipt || receipt.status !== 1) {
-        throw new Error('Transaction failed');
-      }
-
-      logger.info(`Resale listing cancelled: ${ticketId}. TxHash: ${receipt.hash}`);
-      
       return {
         success: true,
         txHash: receipt.hash,
         blockNumber: receipt.blockNumber,
       };
     } catch (error) {
-      logger.error('Error cancelling resale listing:', {
-        message: error.message,
-        reason: error.reason,
-        code: error.code
-      });
+      logger.error('Error cancelling resale listing:', error);
       throw error;
     }
   }
 
-  async useTicket(ticketId, eventId, signature) {
+  async useTicket(ticketId, eventId, nonce, deadline, signature) {
     try {
-      const tx = await this.contract.useTicket(ticketId, eventId, signature);
+      const tx = await this.contract.useTicket(
+        ticketId,
+        eventId,
+        nonce,
+        deadline,
+        signature
+      );
 
       const receipt = await tx.wait();
-      
-      if (!receipt || receipt.status !== 1) {
-        throw new Error('Transaction failed');
-      }
-
-      logger.info(`Ticket used: ${ticketId}. TxHash: ${receipt.hash}`);
       
       return {
         success: true,
@@ -2282,11 +2208,41 @@ class BlockchainService {
         blockNumber: receipt.blockNumber,
       };
     } catch (error) {
-      logger.error('Error using ticket:', {
-        message: error.message,
-        reason: error.reason,
-        code: error.code
-      });
+      logger.error('Error using ticket:', error);
+      throw error;
+    }
+  }
+
+  async withdraw(userAddress) {
+    try {
+      const tx = await this.contract.withdraw();
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error withdrawing:', error);
+      throw error;
+    }
+  }
+
+  async setTokenURI(ticketId, uri) {
+    try {
+      const tx = await this.contract.setTokenURI(ticketId, uri);
+
+      const receipt = await tx.wait();
+      
+      return {
+        success: true,
+        txHash: receipt.hash,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      logger.error('Error setting token URI:', error);
       throw error;
     }
   }
@@ -2309,45 +2265,27 @@ class BlockchainService {
         resaleCount: ticket.resaleCount,
       };
     } catch (error) {
-      logger.error('Error getting ticket details:', {
-        message: error.message,
-        ticketId
-      });
+      logger.error('Error getting ticket details:', error);
       throw error;
     }
   }
 
   async getUserTickets(walletAddress) {
     try {
-      if (!ethers.isAddress(walletAddress)) {
-        throw new Error('Invalid wallet address');
-      }
-
       const ticketIds = await this.readOnlyContract.getUserTickets(walletAddress);
       return ticketIds.map(id => id.toString());
     } catch (error) {
-      logger.error('Error getting user tickets:', {
-        message: error.message,
-        walletAddress
-      });
+      logger.error('Error getting user tickets:', error);
       throw error;
     }
   }
 
   async getUserEventTicketCount(walletAddress, eventId) {
     try {
-      if (!ethers.isAddress(walletAddress)) {
-        throw new Error('Invalid wallet address');
-      }
-
       const count = await this.readOnlyContract.getUserEventTicketCount(walletAddress, eventId);
       return Number(count);
     } catch (error) {
-      logger.error('Error getting user event ticket count:', {
-        message: error.message,
-        walletAddress,
-        eventId
-      });
+      logger.error('Error getting user event ticket count:', error);
       throw error;
     }
   }
@@ -2357,9 +2295,7 @@ class BlockchainService {
       const ticketIds = await this.readOnlyContract.getResaleTickets();
       return ticketIds.map(id => id.toString());
     } catch (error) {
-      logger.error('Error getting resale tickets:', {
-        message: error.message
-      });
+      logger.error('Error getting resale tickets:', error);
       throw error;
     }
   }
@@ -2368,10 +2304,7 @@ class BlockchainService {
     try {
       return await this.readOnlyContract.canResell(ticketId);
     } catch (error) {
-      logger.error('Error checking resell eligibility:', {
-        message: error.message,
-        ticketId
-      });
+      logger.error('Error checking resell eligibility:', error);
       throw error;
     }
   }
@@ -2381,10 +2314,7 @@ class BlockchainService {
       const maxPrice = await this.readOnlyContract.getMaxResalePrice(ticketId);
       return maxPrice.toString();
     } catch (error) {
-      logger.error('Error getting max resale price:', {
-        message: error.message,
-        ticketId
-      });
+      logger.error('Error getting max resale price:', error);
       throw error;
     }
   }
@@ -2393,23 +2323,36 @@ class BlockchainService {
     try {
       return await this.readOnlyContract.getEventCreator(eventId);
     } catch (error) {
-      logger.error('Error getting event creator:', {
-        message: error.message,
-        eventId
-      });
+      logger.error('Error getting event creator:', error);
       throw error;
     }
   }
 
-  async estimateGas(functionName, ...args) {
+  async isEventFinalized(eventId) {
     try {
-      const estimatedGas = await this.contract[functionName].estimateGas(...args);
-      return estimatedGas.toString();
+      return await this.readOnlyContract.isEventFinalized(eventId);
     } catch (error) {
-      logger.error('Error estimating gas:', {
-        message: error.message,
-        functionName
-      });
+      logger.error('Error checking event finalized:', error);
+      throw error;
+    }
+  }
+
+  async getPendingWithdrawal(address) {
+    try {
+      const amount = await this.readOnlyContract.getPendingWithdrawal(address);
+      return amount.toString();
+    } catch (error) {
+      logger.error('Error getting pending withdrawal:', error);
+      throw error;
+    }
+  }
+
+  async getTicketTypePrice(eventId, typeId) {
+    try {
+      const price = await this.readOnlyContract.getTicketTypePrice(eventId, typeId);
+      return ethers.formatEther(price);
+    } catch (error) {
+      logger.error('Error getting ticket type price:', error);
       throw error;
     }
   }
