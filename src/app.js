@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const { PORT, CORS_ORIGIN } = require('./config/env');
+const { PORT } = require('./config/env');
 const logger = require('./utils/logger');
 const errorHandler = require('./middleware/errorHandler');
 const limiter = require('./middleware/rateLimit');
@@ -21,10 +21,17 @@ const indexer = require('./services/indexerService');
 const app = express();
 
 app.use(helmet());
-app.use(cors({ origin: CORS_ORIGIN }));
+
+app.use(cors({
+  origin: ['http://localhost:3001', 'http://127.0.0.1:3000'],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(morgan('combined'));
+app.use(morgan('dev'));
 
 app.use(limiter);
 
@@ -51,12 +58,13 @@ app.use((req, res) => {
 
 const startServer = async () => {
   try {
-    await indexer.start();
-    logger.info('Indexer started successfully');
+    indexer.startSilent();
+    logger.info('Indexer started in silent mode');
 
-    app.listen(PORT, () => {
+    app.listen(PORT, '0.0.0.0', () => {
       logger.info(`🚀 Server running on port ${PORT}`);
       logger.info(`📊 Environment: ${process.env.NODE_ENV}`);
+      logger.info(`🌐 CORS enabled for: http://localhost:3000`);
     });
   } catch (error) {
     logger.error('Failed to start server:', error);

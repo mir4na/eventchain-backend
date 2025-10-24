@@ -16,11 +16,12 @@ const EventChainABI = [
 class IndexerService {
   constructor() {
     this.isRunning = false;
+    this.silentMode = false;
     this.lastProcessedBlock = parseInt(process.env.START_BLOCK) || 0;
-    this.BATCH_SIZE = 1000;
+    this.BATCH_SIZE = 5000;
     this.RETRY_DELAY = 2000;
     this.MAX_RETRIES = 3;
-    this.REQUEST_DELAY = 500;
+    this.REQUEST_DELAY = 200;
     
     this.provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
     this.contract = new ethers.Contract(
@@ -31,13 +32,23 @@ class IndexerService {
   }
 
   async start() {
+    this.silentMode = false;
+    return this._start();
+  }
+
+  async startSilent() {
+    this.silentMode = true;
+    return this._start();
+  }
+
+  async _start() {
     if (this.isRunning) {
-      logger.info('Indexer already running');
+      if (!this.silentMode) logger.info('Indexer already running');
       return;
     }
 
     this.isRunning = true;
-    logger.info('🚀 Starting EventChain Indexer...');
+    if (!this.silentMode) logger.info('🚀 Starting EventChain Indexer...');
 
     await this.loadLastProcessedBlock();
     await this.indexPastEvents();
@@ -55,7 +66,9 @@ class IndexerService {
         this.lastProcessedBlock = lastBlock.blockNumber;
       }
 
-      logger.info(`Starting from block: ${this.lastProcessedBlock}`);
+      if (!this.silentMode) {
+        logger.info(`Starting from block: ${this.lastProcessedBlock}`);
+      }
     } catch (error) {
       logger.error('Error loading last processed block:', error);
     }
@@ -73,7 +86,9 @@ class IndexerService {
         if (i === retries - 1) throw error;
         
         const backoffDelay = this.RETRY_DELAY * Math.pow(2, i);
-        logger.warn(`Retry ${i + 1}/${retries} after ${backoffDelay}ms`);
+        if (!this.silentMode) {
+          logger.warn(`Retry ${i + 1}/${retries} after ${backoffDelay}ms`);
+        }
         await this.delay(backoffDelay);
       }
     }
@@ -82,7 +97,10 @@ class IndexerService {
   async indexPastEvents() {
     try {
       const currentBlock = await this.retryWithBackoff(() => this.provider.getBlockNumber());
-      logger.info(`Indexing from block ${this.lastProcessedBlock} to ${currentBlock}`);
+      
+      if (!this.silentMode) {
+        logger.info(`Indexing from block ${this.lastProcessedBlock} to ${currentBlock}`);
+      }
 
       const events = [
         'RevenueConfigured',
@@ -101,14 +119,19 @@ class IndexerService {
       }
 
       this.lastProcessedBlock = currentBlock;
-      logger.info('✅ Past events indexed successfully');
+      
+      if (!this.silentMode) {
+        logger.info('✅ Past events indexed successfully');
+      }
     } catch (error) {
       logger.error('Error indexing past events:', error);
     }
   }
 
   async indexEventInBatches(eventName, fromBlock, toBlock) {
-    logger.info(`Indexing ${eventName} from block ${fromBlock} to ${toBlock}`);
+    if (!this.silentMode) {
+      logger.info(`Indexing ${eventName} from block ${fromBlock} to ${toBlock}`);
+    }
     
     let currentFrom = fromBlock;
     
@@ -125,12 +148,12 @@ class IndexerService {
           }
         });
         
-        logger.info(`Indexed ${eventName}: blocks ${currentFrom}-${currentTo}`);
         currentFrom = currentTo + 1;
-        
         await this.delay(this.REQUEST_DELAY);
       } catch (error) {
-        logger.error(`Error indexing ${eventName} batch ${currentFrom}-${currentTo}:`, error);
+        if (!this.silentMode) {
+          logger.error(`Error indexing ${eventName} batch ${currentFrom}-${currentTo}:`, error);
+        }
         await this.delay(this.RETRY_DELAY * 2);
       }
     }
@@ -159,7 +182,9 @@ class IndexerService {
       });
     });
 
-    logger.info('✅ Real-time indexing started');
+    if (!this.silentMode) {
+      logger.info('✅ Real-time indexing started');
+    }
   }
 
   async processEvent(eventName, log) {
@@ -193,7 +218,9 @@ class IndexerService {
           break;
       }
 
-      logger.info(`Processed ${eventName} - Block: ${block.number}`);
+      if (!this.silentMode) {
+        logger.info(`Processed ${eventName} - Block: ${block.number}`);
+      }
     } catch (error) {
       logger.error(`Error processing ${eventName}:`, error);
     }
@@ -202,7 +229,9 @@ class IndexerService {
   async handleRevenueConfigured(log, block) {
     const [eventId, creator, taxWallet] = log.args;
     
-    logger.info(`Revenue configured for event ${eventId}`);
+    if (!this.silentMode) {
+      logger.info(`Revenue configured for event ${eventId}`);
+    }
   }
 
   async handleTicketMinted(log, block) {
@@ -398,13 +427,17 @@ class IndexerService {
   async handleRevenueDistributed(log, block) {
     const [eventId, totalAmount, taxAmount, netAmount, timestamp] = log.args;
     
-    logger.info(`Revenue distributed for event ${eventId}: ${totalAmount}`);
+    if (!this.silentMode) {
+      logger.info(`Revenue distributed for event ${eventId}: ${totalAmount}`);
+    }
   }
 
   stop() {
     this.isRunning = false;
     this.contract.removeAllListeners();
-    logger.info('Indexer stopped');
+    if (!this.silentMode) {
+      logger.info('Indexer stopped');
+    }
   }
 }
 

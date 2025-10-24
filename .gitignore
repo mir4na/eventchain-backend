@@ -8,3 +8,4 @@ prisma/migrations/
 .env
 error.log
 combined.log
+out.txt

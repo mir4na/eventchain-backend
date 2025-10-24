@@ -46,7 +46,7 @@ class EOController {
         update: { role: 'EO' }
       });
 
-      const user = await prisma.user.findUnique({
+      const user = await prisma.user.findMany({
         where: { walletAddress: creatorAddress.toLowerCase() }
       });
 
@@ -84,7 +84,7 @@ class EOController {
     try {
       const { address } = req.params;
 
-      const user = await prisma.user.findUnique({
+      const user = await prisma.user.findMany({
         where: { walletAddress: address.toLowerCase() }
       });
 
@@ -376,7 +376,7 @@ class EOController {
     try {
       const { address } = req.params;
 
-      const user = await prisma.user.findUnique({
+      const user = await prisma.user.findMany({
         where: { walletAddress: address.toLowerCase() }
       });
 
