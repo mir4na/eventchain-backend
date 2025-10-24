@@ -32,6 +32,32 @@ class AdminController {
     }
   }
 
+  async getEventOrganizers(req, res) {
+    try {
+      const eos = await prisma.user.findMany({
+        where: { role: 'EO' },
+        select: {
+          id: true,
+          walletAddress: true,
+          name: true,
+          email: true,
+          createdAt: true,
+          _count: {
+            select: {
+              events: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return successResponse(res, eos, 'Event organizers retrieved');
+    } catch (error) {
+      logger.error('Error fetching EOs:', error);
+      return errorResponse(res, 'Failed to fetch event organizers', 500);
+    }
+  }
+
   async approveProposal(req, res) {
     const { proposalId } = req.params;
     const { taxWalletAddress, adminComment } = req.body;
@@ -178,32 +204,6 @@ class AdminController {
     } catch (error) {
       logger.error('Error fetching stats:', error);
       return errorResponse(res, 'Failed to fetch statistics', 500);
-    }
-  }
-
-  async getEventOrganizers(req, res) {
-    try {
-      const eos = await prisma.user.findMany({
-        where: { role: 'EO' },
-        select: {
-          id: true,
-          walletAddress: true,
-          name: true,
-          email: true,
-          createdAt: true,
-          _count: {
-            select: {
-              events: true,
-            },
-          },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-
-      return successResponse(res, eos, 'Event organizers retrieved');
-    } catch (error) {
-      logger.error('Error fetching EOs:', error);
-      return errorResponse(res, 'Failed to fetch event organizers', 500);
     }
   }
 

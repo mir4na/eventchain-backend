@@ -14,13 +14,12 @@ class EOController {
         location,
         date,
         posterUrl,
-        creatorAddress,
         revenueBeneficiaries,
         taxWalletAddress,
-        creatorId
+        attachments
       } = req.body;
 
-      if (!name || !location || !date || !creatorAddress) {
+      if (!name || !location || !date) {
         return errorResponse(res, 'Missing required fields', 400);
       }
 
@@ -28,8 +27,36 @@ class EOController {
         return errorResponse(res, 'Poster URL is required', 400);
       }
 
-      if (!ethers.isAddress(creatorAddress)) {
-        return errorResponse(res, 'Invalid creator address', 400);
+      const { userId } = req.user;
+
+      if (!userId) {
+        return errorResponse(res, 'User not authenticated', 401);
+      }
+
+      const user = await prisma.user.findUnique({
+        where: { id: userId }
+      });
+
+      if (!user) {
+        return errorResponse(res, 'User not found', 404);
+      }
+
+      if (user.role !== 'EO' && user.role !== 'ADMIN') {
+        return errorResponse(res, 'Only Event Organizers can create events', 403);
+      }
+
+      let finalTaxWallet = taxWalletAddress;
+      
+      if (!finalTaxWallet) {
+        if (user.walletAddress) {
+          finalTaxWallet = user.walletAddress;
+        } else {
+          return errorResponse(res, 'Tax wallet address is required. Please connect your wallet or provide a tax wallet address.', 400);
+        }
+      }
+
+      if (!ethers.isAddress(finalTaxWallet)) {
+        return errorResponse(res, 'Invalid tax wallet address', 400);
       }
 
       if (revenueBeneficiaries && revenueBeneficiaries.length > 0) {
@@ -44,17 +71,6 @@ class EOController {
         }
       }
 
-      const user = await prisma.user.findUnique({
-        where: {
-          id: creatorId,
-          // walletAddress: creatorAddress.toLowerCase(),
-        },
-      });
-
-      if (!user) {
-        return errorResponse(res, 'User not found', 404);
-      }
-
       const event = await prisma.event.create({
         data: {
           name,
@@ -67,17 +83,29 @@ class EOController {
         }
       });
 
+      if (attachments && attachments.length > 0) {
+        await prisma.eventAttachment.createMany({
+          data: attachments.map(att => ({
+            eventId: event.id,
+            fileName: att.fileName,
+            fileUrl: att.fileUrl,
+            fileType: att.fileType,
+            fileSize: att.fileSize
+          }))
+        });
+      }
+
       const proposal = await prisma.proposal.create({
         data: {
           eventId: event.id,
           creatorId: user.id,
           revenueBeneficiaries: revenueBeneficiaries || [],
-          taxWalletAddress: taxWalletAddress || creatorAddress.toLowerCase(),
+          taxWalletAddress: finalTaxWallet.toLowerCase(),
           status: 'PENDING'
         }
       });
 
-      logger.info(`Created event ${event.id} by ${creatorAddress}`);
+      logger.info(`Created event ${event.id} by user ${user.id}`);
       return successResponse(res, { event, proposal }, 'Event created successfully and pending admin approval');
     } catch (error) {
       logger.error('Create event error', error);
@@ -89,7 +117,7 @@ class EOController {
     try {
       const { address } = req.params;
 
-      const user = await prisma.user.findUnique({
+      const user = await prisma.user.findFirst({
         where: { walletAddress: address.toLowerCase() }
       });
 
@@ -120,6 +148,7 @@ class EOController {
     try {
       const { eventId } = req.params;
       const { description, location, posterUrl } = req.body;
+      const { userId } = req.user;
 
       const existingEvent = await prisma.event.findUnique({
         where: { id: eventId }
@@ -127,6 +156,10 @@ class EOController {
 
       if (!existingEvent) {
         return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (existingEvent.creatorId !== userId) {
+        return errorResponse(res, 'Unauthorized', 403);
       }
 
       if (existingEvent.status !== 'PENDING') {
@@ -155,6 +188,19 @@ class EOController {
   async deactivateEvent(req, res) {
     try {
       const { eventId } = req.params;
+      const { userId } = req.user;
+
+      const existingEvent = await prisma.event.findUnique({
+        where: { id: eventId }
+      });
+
+      if (!existingEvent) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (existingEvent.creatorId !== userId) {
+        return errorResponse(res, 'Unauthorized', 403);
+      }
 
       const event = await prisma.event.update({
         where: { id: eventId },
@@ -173,6 +219,7 @@ class EOController {
     try {
       const { eventId } = req.params;
       const { name, description, price, stock, saleStartDate, saleEndDate, benefits } = req.body;
+      const { userId } = req.user;
 
       const event = await prisma.event.findUnique({
         where: { id: eventId },
@@ -182,6 +229,11 @@ class EOController {
       });
 
       if (!event) return errorResponse(res, 'Event not found', 404);
+      
+      if (event.creatorId !== userId) {
+        return errorResponse(res, 'Unauthorized', 403);
+      }
+
       if (event.status !== 'APPROVED') return errorResponse(res, 'Event must be approved first', 400);
 
       const ticketType = await prisma.ticketType.create({
@@ -223,6 +275,7 @@ class EOController {
     try {
       const { typeId } = req.params;
       const { price, stock, saleStartDate, saleEndDate, benefits } = req.body;
+      const { userId } = req.user;
 
       const existingType = await prisma.ticketType.findUnique({
         where: { id: typeId },
@@ -230,6 +283,10 @@ class EOController {
       });
 
       if (!existingType) return errorResponse(res, 'Ticket type not found', 404);
+
+      if (existingType.event.creatorId !== userId) {
+        return errorResponse(res, 'Unauthorized', 403);
+      }
 
       const updateData = {};
       if (price !== undefined) updateData.price = price;
@@ -274,19 +331,31 @@ class EOController {
   async getEventRevenue(req, res) {
     try {
       const { eventId } = req.params;
+      const { userId } = req.user;
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.creatorId !== userId) {
+        return errorResponse(res, 'Unauthorized', 403);
+      }
 
       const transactions = await prisma.transaction.findMany({
         where: { eventId, type: 'PURCHASE' }
       });
 
       const totalRevenue = transactions.reduce((sum, tx) => sum + BigInt(tx.amount), BigInt(0));
-      const event = await prisma.event.findUnique({
-        where: { id: eventId },
-        include: { proposals: { where: { status: 'APPROVED' } } }
+      const approvedProposal = await prisma.proposal.findFirst({
+        where: { eventId, status: 'APPROVED' }
       });
 
       let revenueShares = [];
-      if (event.proposals.length > 0) revenueShares = event.proposals[0].revenueBeneficiaries;
+      if (approvedProposal) revenueShares = approvedProposal.revenueBeneficiaries;
 
       const TAX_PERCENTAGE = 1000;
       const BASIS_POINTS = 10000;
@@ -319,6 +388,7 @@ class EOController {
   async getEventAnalytics(req, res) {
     try {
       const { eventId } = req.params;
+      const { userId } = req.user;
 
       const event = await prisma.event.findUnique({
         where: { id: eventId },
@@ -331,6 +401,10 @@ class EOController {
       });
 
       if (!event) return errorResponse(res, 'Event not found', 404);
+
+      if (event.creatorId !== userId) {
+        return errorResponse(res, 'Unauthorized', 403);
+      }
 
       const totalTicketsSold = event.tickets.length;
       const totalRevenue = event.transactions.reduce((sum, tx) => sum + BigInt(tx.amount), BigInt(0));
@@ -361,7 +435,7 @@ class EOController {
     try {
       const { address } = req.params;
 
-      const user = await prisma.user.findUnique({
+      const user = await prisma.user.findFirst({
         where: { walletAddress: address.toLowerCase() }
       });
 
@@ -428,6 +502,7 @@ class EOController {
     try {
       const { ticketId } = req.params;
       const { eventCreatorAddress, scannerAddress } = req.body;
+      const { userId } = req.user;
 
       const ticket = await prisma.ticket.findFirst({
         where: { ticketId: parseInt(ticketId) },
@@ -435,7 +510,11 @@ class EOController {
       });
 
       if (!ticket) return errorResponse(res, 'Ticket not found', 404);
-      if (ticket.event.creator.walletAddress !== eventCreatorAddress.toLowerCase()) return errorResponse(res, 'Unauthorized', 403);
+      
+      if (ticket.event.creatorId !== userId) {
+        return errorResponse(res, 'Unauthorized', 403);
+      }
+
       if (ticket.isUsed) return errorResponse(res, 'Ticket already used', 400);
 
       const nonce = generateNonce();

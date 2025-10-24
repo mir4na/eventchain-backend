@@ -3,7 +3,7 @@ const router = express.Router();
 const eoController = require('../controllers/eoController');
 const { authenticate, requireEO } = require('../middleware/auth');
 
-router.post('/events', authenticate, eoController.createEvent);
+router.post('/events', authenticate, requireEO, eoController.createEvent);
 router.get('/events/:address', eoController.getEOEvents);
 router.put('/events/:eventId', authenticate, requireEO, eoController.updateEvent);
 router.delete('/events/:eventId', authenticate, requireEO, eoController.deactivateEvent);
