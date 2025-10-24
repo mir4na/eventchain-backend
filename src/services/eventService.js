@@ -40,8 +40,9 @@ class EventService {
         ticketTypes: {
           where: { active: true }
         },
+        attachments: true,
         _count: {
-          select: { tickets: true, favorites: true }
+          select: { tickets: true, bookmarks: true }
         }
       },
       orderBy: { [sortBy]: order }
@@ -67,8 +68,9 @@ class EventService {
         proposals: {
           where: { status: 'APPROVED' }
         },
+        attachments: true,
         _count: {
-          select: { tickets: true, favorites: true }
+          select: { tickets: true, bookmarks: true }
         }
       }
     });
@@ -95,8 +97,9 @@ class EventService {
         ticketTypes: {
           where: { active: true }
         },
+        attachments: true,
         _count: {
-          select: { tickets: true }
+          select: { tickets: true, bookmarks: true }
         }
       },
       orderBy: { createdAt: 'desc' }
@@ -139,12 +142,13 @@ class EventService {
       totalRevenue: totalRevenue.toString(),
       ticketStats,
       activeListings: event.tickets.filter(t => t.isForResale).length,
-      usedTickets: event.tickets.filter(t => t.isUsed).length
+      usedTickets: event.tickets.filter(t => t.isUsed).length,
+      bookmarkCount: event.bookmarkCount
     };
   }
 
-  async toggleFavorite(userId, eventId) {
-    const existing = await prisma.favorite.findUnique({
+  async toggleBookmark(userId, eventId) {
+    const existing = await prisma.eventBookmark.findUnique({
       where: {
         userId_eventId: {
           userId,
@@ -154,23 +158,35 @@ class EventService {
     });
 
     if (existing) {
-      await prisma.favorite.delete({
-        where: { id: existing.id }
-      });
-      return { favorited: false };
+      await prisma.$transaction([
+        prisma.eventBookmark.delete({
+          where: { id: existing.id }
+        }),
+        prisma.event.update({
+          where: { id: eventId },
+          data: { bookmarkCount: { decrement: 1 } }
+        })
+      ]);
+      return { bookmarked: false };
     } else {
-      await prisma.favorite.create({
-        data: {
-          userId,
-          eventId
-        }
-      });
-      return { favorited: true };
+      await prisma.$transaction([
+        prisma.eventBookmark.create({
+          data: {
+            userId,
+            eventId
+          }
+        }),
+        prisma.event.update({
+          where: { id: eventId },
+          data: { bookmarkCount: { increment: 1 } }
+        })
+      ]);
+      return { bookmarked: true };
     }
   }
 
-  async getUserFavorites(userId) {
-    const favorites = await prisma.favorite.findMany({
+  async getUserBookmarks(userId) {
+    const bookmarks = await prisma.eventBookmark.findMany({
       where: { userId },
       include: {
         event: {
@@ -184,8 +200,9 @@ class EventService {
             ticketTypes: {
               where: { active: true }
             },
+            attachments: true,
             _count: {
-              select: { tickets: true }
+              select: { tickets: true, bookmarks: true }
             }
           }
         }
@@ -193,7 +210,20 @@ class EventService {
       orderBy: { createdAt: 'desc' }
     });
 
-    return favorites.map(fav => this.formatEventResponse(fav.event));
+    return bookmarks.map(bookmark => this.formatEventResponse(bookmark.event));
+  }
+
+  async isEventBookmarked(userId, eventId) {
+    const bookmark = await prisma.eventBookmark.findUnique({
+      where: {
+        userId_eventId: {
+          userId,
+          eventId
+        }
+      }
+    });
+
+    return !!bookmark;
   }
 
   formatEventResponse(event) {
@@ -227,6 +257,7 @@ class EventService {
       posterUrl: event.posterUrl,
       status: event.status,
       ticketStatus,
+      bookmarkCount: event.bookmarkCount,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
       creator: event.creator ? {
@@ -235,8 +266,9 @@ class EventService {
       } : null,
       ticketTypes: event.ticketTypes || [],
       proposals: event.proposals || [],
+      attachments: event.attachments || [],
       totalTicketsSold: event._count?.tickets || 0,
-      totalFavorites: event._count?.favorites || 0,
+      totalBookmarks: event._count?.bookmarks || 0,
       isPast: eventDate < now
     };
   }

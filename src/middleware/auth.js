@@ -17,10 +17,19 @@ const authenticate = async (req, res, next) => {
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
       
+      const user = await prisma.user.findUnique({
+        where: { id: decoded.userId }
+      });
+
+      if (!user) {
+        return errorResponse(res, 'User not found', 401);
+      }
+
       req.user = {
-        userId: decoded.userId,
-        address: decoded.address,
-        role: decoded.role
+        userId: user.id,
+        email: user.email,
+        walletAddress: user.walletAddress,
+        role: user.role
       };
 
       next();
@@ -41,18 +50,10 @@ const requireAdmin = async (req, res, next) => {
       return errorResponse(res, 'Authentication required', 401);
     }
 
-    const admin = await prisma.admin.findUnique({
-      where: { 
-        address: req.user.address.toLowerCase(),
-        active: true
-      }
-    });
-
-    if (!admin) {
+    if (req.user.role !== 'ADMIN') {
       return errorResponse(res, 'Admin access required', 403);
     }
 
-    req.admin = admin;
     next();
   } catch (error) {
     return errorResponse(res, 'Admin verification failed', 500);
@@ -84,11 +85,18 @@ const optionalAuth = async (req, res, next) => {
       
       try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        req.user = {
-          userId: decoded.userId,
-          address: decoded.address,
-          role: decoded.role
-        };
+        const user = await prisma.user.findUnique({
+          where: { id: decoded.userId }
+        });
+
+        if (user) {
+          req.user = {
+            userId: user.id,
+            email: user.email,
+            walletAddress: user.walletAddress,
+            role: user.role
+          };
+        }
       } catch (err) {
         req.user = null;
       }

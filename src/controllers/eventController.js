@@ -49,27 +49,35 @@ class EventController {
     }
   }
 
-  async toggleFavorite(req, res) {
+  async toggleBookmark(req, res) {
     try {
       const { eventId } = req.params;
-      const { userId } = req.body;
+      const { userId } = req.user;
 
-      if (!userId) {
-        return errorResponse(res, 'User ID is required', 400);
-      }
-
-      const result = await eventService.toggleFavorite(userId, eventId);
-      return successResponse(res, result, 'Favorite toggled successfully');
+      const result = await eventService.toggleBookmark(userId, eventId);
+      return successResponse(res, result, 'Bookmark toggled successfully');
     } catch (error) {
       return errorResponse(res, error.message);
     }
   }
 
-  async getUserFavorites(req, res) {
+  async getUserBookmarks(req, res) {
     try {
-      const { userId } = req.params;
-      const favorites = await eventService.getUserFavorites(userId);
-      return successResponse(res, favorites, 'Favorites retrieved successfully');
+      const { userId } = req.user;
+      const bookmarks = await eventService.getUserBookmarks(userId);
+      return successResponse(res, bookmarks, 'Bookmarks retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
+  async isEventBookmarked(req, res) {
+    try {
+      const { eventId } = req.params;
+      const { userId } = req.user;
+      
+      const isBookmarked = await eventService.isEventBookmarked(userId, eventId);
+      return successResponse(res, { isBookmarked }, 'Bookmark status retrieved');
     } catch (error) {
       return errorResponse(res, error.message);
     }

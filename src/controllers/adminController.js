@@ -11,7 +11,6 @@ class AdminController {
         include: {
           event: {
             include: {
-              ticketTypes: true,
               creator: {
                 select: {
                   id: true,
@@ -89,6 +88,7 @@ class AdminController {
         proposalId,
         txHash: blockchainResult.txHash,
         blockNumber: blockchainResult.blockNumber,
+        message: 'Event approved. EO can now configure ticket types.'
       }, 'Proposal approved successfully');
     } catch (error) {
       logger.error('Error approving proposal:', error);

@@ -12,7 +12,7 @@ class AuthController {
   async register(req, res) {
     try {
       const { username, email, password, role } = req.body;
-
+      
       if (!username || !email || !password) {
         return errorResponse(res, 'Username, email, and password are required', 400);
       }
@@ -89,6 +89,69 @@ class AuthController {
 
       if (!email || !password) {
         return errorResponse(res, 'Email and password are required', 400);
+      }
+
+      const admin = await prisma.admin.findUnique({
+        where: { email: email.toLowerCase() }
+      });
+
+      if (admin && admin.password) {
+        const isValidPassword = await bcrypt.compare(password, admin.password);
+        if (isValidPassword) {
+          let user = await prisma.user.findFirst({
+            where: { email: email.toLowerCase() }
+          });
+
+          if (!user) {
+            user = await prisma.user.create({
+              data: {
+                email: email.toLowerCase(),
+                name: email.split('@')[0],
+                role: 'ADMIN',
+                walletAddress: admin.address || ''
+              }
+            });
+          } else if (user.role !== 'ADMIN') {
+            user = await prisma.user.update({
+              where: { id: user.id },
+              data: { role: 'ADMIN' }
+            });
+          }
+
+          const token = jwt.sign(
+            { 
+              userId: user.id,
+              email: user.email,
+              role: 'ADMIN'
+            },
+            JWT_SECRET,
+            { expiresIn: JWT_EXPIRES_IN }
+          );
+
+          await prisma.walletHistory.create({
+            data: {
+              userId: user.id,
+              action: 'ADMIN_LOGIN',
+              details: {
+                timestamp: new Date().toISOString(),
+                ip: req.ip
+              }
+            }
+          });
+
+          logger.info(`Admin logged in: ${email}`);
+
+          return successResponse(res, {
+            token,
+            user: {
+              id: user.id,
+              username: user.name,
+              email: user.email,
+              role: 'ADMIN',
+              walletAddress: user.walletAddress || null
+            }
+          }, 'Admin login successful');
+        }
       }
 
       const user = await prisma.user.findUnique({
@@ -181,6 +244,15 @@ class AuthController {
         where: { id: userId },
         data: {
           walletAddress: walletAddress.toLowerCase()
+        },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          walletAddress: true,
+          role: true,
+          createdAt: true,
+          updatedAt: true
         }
       });
 

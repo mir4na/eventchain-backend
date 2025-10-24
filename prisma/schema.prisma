@@ -21,7 +21,7 @@ model User {
   tickets       Ticket[]
   proposals     Proposal[]
   transactions  Transaction[]
-  favorites     Favorite[]
+  bookmarks     EventBookmark[]
   walletHistory WalletHistory[]
 }
 
@@ -44,7 +44,9 @@ model WalletHistory {
 
 model Admin {
   id        String   @id @default(uuid())
-  address   String   @unique
+  email     String   @unique
+  password  String
+  address   String   @default("")
   active    Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -63,14 +65,17 @@ model Event {
   creatorId   String
   creator     User        @relation(fields: [creatorId], references: [id])
   
+  bookmarkCount Int       @default(0)
+  
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
   ticketTypes TicketType[]
   proposals   Proposal[]
   tickets     Ticket[]
-  favorites   Favorite[]
+  bookmarks   EventBookmark[]
   transactions Transaction[]
+  attachments EventAttachment[]
   
   @@index([creatorId])
   @@index([status])
@@ -83,6 +88,32 @@ enum EventStatus {
   ACTIVE
   ENDED
   CANCELLED
+}
+
+model EventBookmark {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  eventId   String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, eventId])
+  @@index([userId])
+  @@index([eventId])
+}
+
+model EventAttachment {
+  id          String   @id @default(uuid())
+  eventId     String
+  event       Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  fileName    String
+  fileUrl     String
+  fileType    String
+  fileSize    Int
+  uploadedAt  DateTime @default(now())
+
+  @@index([eventId])
 }
 
 model Proposal {
@@ -213,17 +244,4 @@ enum TransactionType {
   PURCHASE
   RESALE_BUY
   USE
-}
-
-model Favorite {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  eventId   String
-  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  createdAt DateTime @default(now())
-
-  @@unique([userId, eventId])
-  @@index([userId])
-  @@index([eventId])
 }

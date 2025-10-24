@@ -16,11 +16,16 @@ class EOController {
         posterUrl,
         creatorAddress,
         revenueBeneficiaries,
-        taxWalletAddress
+        taxWalletAddress,
+        creatorId
       } = req.body;
 
       if (!name || !location || !date || !creatorAddress) {
         return errorResponse(res, 'Missing required fields', 400);
+      }
+
+      if (!posterUrl) {
+        return errorResponse(res, 'Poster URL is required', 400);
       }
 
       if (!ethers.isAddress(creatorAddress)) {
@@ -32,7 +37,6 @@ class EOController {
         if (totalPercentage !== 10000) {
           return errorResponse(res, 'Revenue percentages must total 100% (10000 basis points)', 400);
         }
-
         for (const beneficiary of revenueBeneficiaries) {
           if (!ethers.isAddress(beneficiary.address)) {
             return errorResponse(res, `Invalid beneficiary address: ${beneficiary.address}`, 400);
@@ -40,15 +44,16 @@ class EOController {
         }
       }
 
-      await prisma.user.upsert({
-        where: { walletAddress: creatorAddress.toLowerCase() },
-        create: { walletAddress: creatorAddress.toLowerCase(), role: 'EO' },
-        update: { role: 'EO' }
+      const user = await prisma.user.findUnique({
+        where: {
+          id: creatorId,
+          // walletAddress: creatorAddress.toLowerCase(),
+        },
       });
 
-      const user = await prisma.user.findMany({
-        where: { walletAddress: creatorAddress.toLowerCase() }
-      });
+      if (!user) {
+        return errorResponse(res, 'User not found', 404);
+      }
 
       const event = await prisma.event.create({
         data: {
@@ -58,7 +63,7 @@ class EOController {
           date: new Date(date),
           posterUrl,
           status: 'PENDING',
-          creatorId: user.id,
+          creatorId: user.id
         }
       });
 
@@ -72,10 +77,10 @@ class EOController {
         }
       });
 
-      logger.info(`Event created: ${event.id} by ${creatorAddress}`);
-      return successResponse(res, { event, proposal }, 'Event created and submitted for approval');
+      logger.info(`Created event ${event.id} by ${creatorAddress}`);
+      return successResponse(res, { event, proposal }, 'Event created successfully and pending admin approval');
     } catch (error) {
-      logger.error('Error creating event:', error);
+      logger.error('Create event error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -84,7 +89,7 @@ class EOController {
     try {
       const { address } = req.params;
 
-      const user = await prisma.user.findMany({
+      const user = await prisma.user.findUnique({
         where: { walletAddress: address.toLowerCase() }
       });
 
@@ -98,7 +103,7 @@ class EOController {
           ticketTypes: true,
           proposals: true,
           _count: {
-            select: { tickets: true }
+            select: { tickets: true, bookmarks: true }
           }
         },
         orderBy: { createdAt: 'desc' }
@@ -106,7 +111,7 @@ class EOController {
 
       return successResponse(res, events, 'EO events retrieved successfully');
     } catch (error) {
-      logger.error('Error getting EO events:', error);
+      logger.error('Get EO events error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -116,20 +121,33 @@ class EOController {
       const { eventId } = req.params;
       const { description, location, posterUrl } = req.body;
 
-      const event = await prisma.event.update({
-        where: { id: eventId },
-        data: {
-          description,
-          location,
-          posterUrl,
-          updatedAt: new Date()
-        }
+      const existingEvent = await prisma.event.findUnique({
+        where: { id: eventId }
       });
 
-      logger.info(`Event updated: ${eventId}`);
-      return successResponse(res, event, 'Event updated successfully');
+      if (!existingEvent) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (existingEvent.status !== 'PENDING') {
+        return errorResponse(res, 'Cannot edit event after approval', 400);
+      }
+
+      const updateData = {};
+      if (description !== undefined) updateData.description = description;
+      if (location !== undefined) updateData.location = location;
+      if (posterUrl !== undefined) updateData.posterUrl = posterUrl;
+      updateData.updatedAt = new Date();
+
+      const event = await prisma.event.update({
+        where: { id: eventId },
+        data: updateData
+      });
+
+      logger.info(`Updated event ${eventId}`);
+      return successResponse(res, event, 'Event updated');
     } catch (error) {
-      logger.error('Error updating event:', error);
+      logger.error('Update event error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -143,10 +161,10 @@ class EOController {
         data: { status: 'ENDED' }
       });
 
-      logger.info(`Event deactivated: ${eventId}`);
-      return successResponse(res, event, 'Event deactivated successfully');
+      logger.info(`Deactivated event ${eventId}`);
+      return successResponse(res, event, 'Event deactivated');
     } catch (error) {
-      logger.error('Error deactivating event:', error);
+      logger.error('Deactivate event error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -154,27 +172,17 @@ class EOController {
   async addTicketType(req, res) {
     try {
       const { eventId } = req.params;
-      const {
-        name,
-        description,
-        price,
-        stock,
-        saleStartDate,
-        saleEndDate,
-        benefits
-      } = req.body;
+      const { name, description, price, stock, saleStartDate, saleEndDate, benefits } = req.body;
 
       const event = await prisma.event.findUnique({
-        where: { id: eventId }
+        where: { id: eventId },
+        include: {
+          ticketTypes: true
+        }
       });
 
-      if (!event) {
-        return errorResponse(res, 'Event not found', 404);
-      }
-
-      if (event.status !== 'APPROVED') {
-        return errorResponse(res, 'Event must be approved before adding ticket types', 400);
-      }
+      if (!event) return errorResponse(res, 'Event not found', 404);
+      if (event.status !== 'APPROVED') return errorResponse(res, 'Event must be approved first', 400);
 
       const ticketType = await prisma.ticketType.create({
         data: {
@@ -190,21 +198,23 @@ class EOController {
         }
       });
 
-      await blockchainService.setTicketTypePrice(
-        event.eventId,
-        ticketType.typeId,
-        price
-      );
+      await blockchainService.setTicketTypePrice(event.eventId, ticketType.typeId, price);
 
-      await prisma.event.update({
-        where: { id: eventId },
-        data: { status: 'ACTIVE' }
+      const allTicketTypes = await prisma.ticketType.findMany({
+        where: { eventId: event.id }
       });
 
-      logger.info(`Ticket type added for event ${eventId}`);
+      if (allTicketTypes.length > 0) {
+        await prisma.event.update({ 
+          where: { id: eventId }, 
+          data: { status: 'ACTIVE' } 
+        });
+      }
+
+      logger.info(`Added ticket type for event ${eventId}`);
       return successResponse(res, ticketType, 'Ticket type added successfully');
     } catch (error) {
-      logger.error('Error adding ticket type:', error);
+      logger.error('Add ticket type error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -219,9 +229,7 @@ class EOController {
         include: { event: true }
       });
 
-      if (!existingType) {
-        return errorResponse(res, 'Ticket type not found', 404);
-      }
+      if (!existingType) return errorResponse(res, 'Ticket type not found', 404);
 
       const updateData = {};
       if (price !== undefined) updateData.price = price;
@@ -236,17 +244,13 @@ class EOController {
       });
 
       if (price !== undefined) {
-        await blockchainService.setTicketTypePrice(
-          existingType.event.eventId,
-          existingType.typeId,
-          price
-        );
+        await blockchainService.setTicketTypePrice(existingType.event.eventId, existingType.typeId, price);
       }
 
-      logger.info(`Ticket type updated: ${typeId}`);
-      return successResponse(res, ticketType, 'Ticket type updated successfully');
+      logger.info(`Updated ticket type ${typeId}`);
+      return successResponse(res, ticketType, 'Ticket type updated');
     } catch (error) {
-      logger.error('Error updating ticket type:', error);
+      logger.error('Update ticket type error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -260,9 +264,9 @@ class EOController {
         orderBy: { createdAt: 'asc' }
       });
 
-      return successResponse(res, ticketTypes, 'Ticket types retrieved successfully');
+      return successResponse(res, ticketTypes, 'Ticket types retrieved');
     } catch (error) {
-      logger.error('Error getting ticket types:', error);
+      logger.error('Get ticket types error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -272,33 +276,20 @@ class EOController {
       const { eventId } = req.params;
 
       const transactions = await prisma.transaction.findMany({
-        where: {
-          eventId,
-          type: 'PURCHASE'
-        }
+        where: { eventId, type: 'PURCHASE' }
       });
 
-      const totalRevenue = transactions.reduce((sum, tx) => {
-        return sum + BigInt(tx.amount);
-      }, BigInt(0));
-
+      const totalRevenue = transactions.reduce((sum, tx) => sum + BigInt(tx.amount), BigInt(0));
       const event = await prisma.event.findUnique({
         where: { id: eventId },
-        include: {
-          proposals: {
-            where: { status: 'APPROVED' }
-          }
-        }
+        include: { proposals: { where: { status: 'APPROVED' } } }
       });
 
       let revenueShares = [];
-      if (event.proposals.length > 0) {
-        revenueShares = event.proposals[0].revenueBeneficiaries;
-      }
+      if (event.proposals.length > 0) revenueShares = event.proposals[0].revenueBeneficiaries;
 
       const TAX_PERCENTAGE = 1000;
       const BASIS_POINTS = 10000;
-      
       const taxAmount = (totalRevenue * BigInt(TAX_PERCENTAGE)) / BigInt(BASIS_POINTS);
       const netAmount = totalRevenue - taxAmount;
 
@@ -318,9 +309,9 @@ class EOController {
         netAmount: netAmount.toString(),
         transactions: transactions.length,
         revenueShares: detailedShares
-      }, 'Revenue retrieved successfully');
+      }, 'Revenue retrieved');
     } catch (error) {
-      logger.error('Error getting revenue:', error);
+      logger.error('Get revenue error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -334,28 +325,21 @@ class EOController {
         include: {
           ticketTypes: true,
           tickets: true,
-          transactions: {
-            where: { type: 'PURCHASE' }
-          }
+          transactions: { where: { type: 'PURCHASE' } },
+          _count: { select: { bookmarks: true } }
         }
       });
 
-      if (!event) {
-        return errorResponse(res, 'Event not found', 404);
-      }
+      if (!event) return errorResponse(res, 'Event not found', 404);
 
       const totalTicketsSold = event.tickets.length;
-      const totalRevenue = event.transactions.reduce((sum, tx) => {
-        return sum + BigInt(tx.amount);
-      }, BigInt(0));
-
+      const totalRevenue = event.transactions.reduce((sum, tx) => sum + BigInt(tx.amount), BigInt(0));
       const ticketStats = event.ticketTypes.map(type => ({
         typeName: type.name,
         sold: type.sold,
         totalSupply: type.stock,
         percentage: type.stock > 0 ? (type.sold / type.stock * 100).toFixed(2) : 0
       }));
-
       const salesByDay = await this.getSalesByDay(eventId);
 
       return successResponse(res, {
@@ -364,10 +348,11 @@ class EOController {
         ticketStats,
         salesByDay,
         activeListings: event.tickets.filter(t => t.isForResale).length,
-        usedTickets: event.tickets.filter(t => t.isUsed).length
-      }, 'Analytics retrieved successfully');
+        usedTickets: event.tickets.filter(t => t.isUsed).length,
+        bookmarkCount: event._count.bookmarks
+      }, 'Analytics retrieved');
     } catch (error) {
-      logger.error('Error getting analytics:', error);
+      logger.error('Get analytics error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -376,41 +361,30 @@ class EOController {
     try {
       const { address } = req.params;
 
-      const user = await prisma.user.findMany({
+      const user = await prisma.user.findUnique({
         where: { walletAddress: address.toLowerCase() }
       });
 
-      if (!user) {
-        return errorResponse(res, 'User not found', 404);
-      }
+      if (!user) return errorResponse(res, 'User not found', 404);
 
       const events = await prisma.event.findMany({
         where: { creatorId: user.id },
-        include: {
-          tickets: true,
-          transactions: {
-            where: { type: 'PURCHASE' }
-          }
-        }
+        include: { tickets: true, transactions: { where: { type: 'PURCHASE' } } }
       });
 
       const totalEvents = events.length;
       const activeEvents = events.filter(e => e.status === 'ACTIVE').length;
       const totalTicketsSold = events.reduce((sum, e) => sum + e.tickets.length, 0);
-      const totalRevenue = events.reduce((sum, e) => {
-        return sum + e.transactions.reduce((txSum, tx) => {
-          return txSum + BigInt(tx.amount);
-        }, BigInt(0));
-      }, BigInt(0));
+      const totalRevenue = events.reduce((sum, e) => sum + e.transactions.reduce((txSum, tx) => txSum + BigInt(tx.amount), BigInt(0)), BigInt(0));
 
       return successResponse(res, {
         totalEvents,
         activeEvents,
         totalTicketsSold,
         totalRevenue: totalRevenue.toString()
-      }, 'Dashboard stats retrieved successfully');
+      }, 'Dashboard stats retrieved');
     } catch (error) {
-      logger.error('Error getting dashboard stats:', error);
+      logger.error('Get dashboard stats error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -421,29 +395,14 @@ class EOController {
 
       const ticket = await prisma.ticket.findUnique({
         where: { ticketId: parseInt(ticketId) },
-        include: {
-          event: {
-            include: { creator: true }
-          },
-          ticketType: true,
-          owner: true
-        }
+        include: { event: { include: { creator: true } }, ticketType: true, owner: true }
       });
 
-      if (!ticket) {
-        return errorResponse(res, 'Ticket not found', 404);
-      }
+      if (!ticket) return errorResponse(res, 'Ticket not found', 404);
 
       const nonce = generateNonce();
       const deadline = generateDeadline(5);
-      
-      const signature = await generateTicketUseSignature(
-        ticket.ticketId,
-        ticket.event.eventId,
-        req.body.scannerAddress || ticket.owner.walletAddress,
-        nonce,
-        deadline
-      );
+      const signature = await generateTicketUseSignature(ticket.ticketId, ticket.event.eventId, req.body.scannerAddress || ticket.owner.walletAddress, nonce, deadline);
 
       const qrData = {
         ticketId: ticket.ticketId,
@@ -458,9 +417,9 @@ class EOController {
         signature
       };
 
-      return successResponse(res, qrData, 'Ticket verified successfully');
+      return successResponse(res, qrData, 'Ticket verified');
     } catch (error) {
-      logger.error('Error verifying ticket:', error);
+      logger.error('Verify ticket error', error);
       return errorResponse(res, error.message, 500);
     }
   }
@@ -472,73 +431,39 @@ class EOController {
 
       const ticket = await prisma.ticket.findFirst({
         where: { ticketId: parseInt(ticketId) },
-        include: { 
-          event: {
-            include: { creator: true }
-          }
-        }
+        include: { event: { include: { creator: true } } }
       });
 
-      if (!ticket) {
-        return errorResponse(res, 'Ticket not found', 404);
-      }
-
-      if (ticket.event.creator.walletAddress !== eventCreatorAddress.toLowerCase()) {
-        return errorResponse(res, 'Unauthorized', 403);
-      }
-
-      if (ticket.isUsed) {
-        return errorResponse(res, 'Ticket already used', 400);
-      }
+      if (!ticket) return errorResponse(res, 'Ticket not found', 404);
+      if (ticket.event.creator.walletAddress !== eventCreatorAddress.toLowerCase()) return errorResponse(res, 'Unauthorized', 403);
+      if (ticket.isUsed) return errorResponse(res, 'Ticket already used', 400);
 
       const nonce = generateNonce();
       const deadline = generateDeadline(5);
+      const signature = await generateTicketUseSignature(ticket.ticketId, ticket.event.eventId, scannerAddress || ticket.owner.walletAddress, nonce, deadline);
 
-      const signature = await generateTicketUseSignature(
-        ticket.ticketId,
-        ticket.event.eventId,
-        scannerAddress || ticket.owner.walletAddress,
-        nonce,
-        deadline
-      );
-
-      logger.info(`Ticket use signature generated for ticket ${ticketId}`);
-      return successResponse(res, { 
-        ticketId: ticket.ticketId,
-        eventId: ticket.event.eventId,
-        nonce,
-        deadline,
-        signature,
-        message: 'Use this signature to call useTicket() on smart contract'
-      }, 'Signature generated successfully');
+      logger.info(`Generated signature for ticket ${ticketId}`);
+      return successResponse(res, { ticketId: ticket.ticketId, eventId: ticket.event.eventId, nonce, deadline, signature, message: 'Use this signature on contract' }, 'Signature generated');
     } catch (error) {
-      logger.error('Error using ticket:', error);
+      logger.error('Use ticket error', error);
       return errorResponse(res, error.message, 500);
     }
   }
 
   async getSalesByDay(eventId) {
     const transactions = await prisma.transaction.findMany({
-      where: {
-        eventId,
-        type: 'PURCHASE'
-      },
+      where: { eventId, type: 'PURCHASE' },
       orderBy: { timestamp: 'asc' }
     });
 
     const salesByDay = {};
     transactions.forEach(tx => {
       const date = tx.timestamp.toISOString().split('T')[0];
-      if (!salesByDay[date]) {
-        salesByDay[date] = 0;
-      }
+      if (!salesByDay[date]) salesByDay[date] = 0;
       salesByDay[date]++;
     });
 
-    return Object.entries(salesByDay).map(([date, count]) => ({
-      date,
-      sales: count
-    }));
+    return Object.entries(salesByDay).map(([date, count]) => ({ date, sales: count }));
   }
 }
 
