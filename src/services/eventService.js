@@ -50,6 +50,32 @@ class EventService {
     return events.map(event => this.formatEventResponse(event));
   }
 
+  async getPublicEvents() {
+    const events = await prisma.event.findMany({
+      where: { 
+        status: 'ACTIVE',
+        date: { gte: new Date() }
+      },
+      include: {
+        creator: {
+          select: {
+            walletAddress: true,
+            name: true
+          }
+        },
+        ticketTypes: {
+          where: { active: true }
+        },
+        _count: {
+          select: { tickets: true, favorites: true }
+        }
+      },
+      orderBy: { createdAt: 'desc' }
+    });
+
+    return events.map(event => this.formatEventResponse(event));
+  }
+
   async getEventById(eventId) {
     const event = await prisma.event.findUnique({
       where: { id: eventId },

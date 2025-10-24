@@ -33,6 +33,34 @@ class AdminController {
     }
   }
 
+  async getEventsWithProposals(req, res) {
+    try {
+      const events = await prisma.event.findMany({
+        where: { status: 'PENDING' },
+        include: {
+          creator: {
+            select: {
+              id: true,
+              walletAddress: true,
+              name: true,
+              email: true,
+            },
+          },
+          proposals: {
+            where: { status: 'PENDING' }
+          },
+          ticketTypes: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return successResponse(res, events, 'Events with pending proposals retrieved');
+    } catch (error) {
+      logger.error('Error fetching events with proposals:', error);
+      return errorResponse(res, 'Failed to fetch events with proposals', 500);
+    }
+  }
+
   async approveProposal(req, res) {
     const { proposalId } = req.params;
     const { taxWalletAddress, adminComment } = req.body;
@@ -178,6 +206,49 @@ class AdminController {
     } catch (error) {
       logger.error('Error fetching stats:', error);
       return errorResponse(res, 'Failed to fetch statistics', 500);
+    }
+  }
+
+  async getAdminStats(req, res) {
+    try {
+      const [
+        totalEvents,
+        activeEvents,
+        totalTicketsSold,
+        totalRevenue,
+        recentTransactions
+      ] = await Promise.all([
+        prisma.event.count(),
+        prisma.event.count({ where: { status: 'ACTIVE' } }),
+        prisma.ticket.count(),
+        prisma.transaction.aggregate({
+          where: { type: 'PURCHASE' },
+          _sum: { amount: true },
+        }),
+        prisma.transaction.findMany({
+          take: 10,
+          orderBy: { timestamp: 'desc' },
+          include: {
+            user: {
+              select: {
+                walletAddress: true,
+                name: true,
+              },
+            },
+          },
+        }),
+      ]);
+
+      return successResponse(res, {
+        totalEvents,
+        activeEvents,
+        totalTicketsSold,
+        totalRevenue: totalRevenue._sum.amount || '0',
+        recentTransactions,
+      }, 'Admin statistics retrieved');
+    } catch (error) {
+      logger.error('Error fetching admin stats:', error);
+      return errorResponse(res, 'Failed to fetch admin statistics', 500);
     }
   }
 
