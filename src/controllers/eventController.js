@@ -19,6 +19,15 @@ class EventController {
     }
   }
 
+  async getPublicEvents(req, res) {
+    try {
+      const events = await eventService.getPublicEvents();
+      return successResponse(res, events, 'Public events retrieved successfully');
+    } catch (error) {
+      return errorResponse(res, error.message);
+    }
+  }
+
   async getEventById(req, res) {
     try {
       const { eventId } = req.params;

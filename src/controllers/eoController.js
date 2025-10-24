@@ -1,5 +1,6 @@
 const prisma = require('../config/database');
 const blockchainService = require('../services/blockchainService');
+const pinataService = require('../services/pinataService');
 const { successResponse, errorResponse } = require('../utils/response');
 const { generateTicketUseSignature, generateNonce, generateDeadline } = require('../middleware/signature');
 const logger = require('../utils/logger');
@@ -40,13 +41,27 @@ class EOController {
         }
       }
 
+      let finalPosterUrl = posterUrl;
+
+      if (req.file) {
+        try {
+          finalPosterUrl = await pinataService.uploadFile(req.file, {
+            eventName: name,
+            creatorAddress: creatorAddress.toLowerCase()
+          });
+        } catch (uploadError) {
+          logger.error('Error uploading poster to Pinata:', uploadError);
+          return errorResponse(res, 'Failed to upload event poster', 500);
+        }
+      }
+
       await prisma.user.upsert({
         where: { walletAddress: creatorAddress.toLowerCase() },
         create: { walletAddress: creatorAddress.toLowerCase(), role: 'EO' },
         update: { role: 'EO' }
       });
 
-      const user = await prisma.user.findMany({
+      const user = await prisma.user.findFirst({
         where: { walletAddress: creatorAddress.toLowerCase() }
       });
 
@@ -56,7 +71,7 @@ class EOController {
           description,
           location,
           date: new Date(date),
-          posterUrl,
+          posterUrl: finalPosterUrl,
           status: 'PENDING',
           creatorId: user.id,
         }
@@ -196,15 +211,57 @@ class EOController {
         price
       );
 
-      await prisma.event.update({
-        where: { id: eventId },
-        data: { status: 'ACTIVE' }
+      const hasTicketTypes = await prisma.ticketType.count({
+        where: { eventId: event.id }
       });
+
+      if (hasTicketTypes > 0) {
+        await prisma.event.update({
+          where: { id: eventId },
+          data: { status: 'ACTIVE' }
+        });
+      }
 
       logger.info(`Ticket type added for event ${eventId}`);
       return successResponse(res, ticketType, 'Ticket type added successfully');
     } catch (error) {
       logger.error('Error adding ticket type:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  async finalizeEvent(req, res) {
+    try {
+      const { eventId } = req.params;
+
+      const event = await prisma.event.findUnique({
+        where: { id: eventId },
+        include: { ticketTypes: true }
+      });
+
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.status !== 'APPROVED') {
+        return errorResponse(res, 'Event must be approved before finalizing', 400);
+      }
+
+      if (event.ticketTypes.length === 0) {
+        return errorResponse(res, 'Event must have at least one ticket type before finalizing', 400);
+      }
+
+      await blockchainService.finalizeEvent(event.eventId);
+
+      await prisma.event.update({
+        where: { id: eventId },
+        data: { status: 'ACTIVE' }
+      });
+
+      logger.info(`Event finalized: ${eventId}`);
+      return successResponse(res, { eventId }, 'Event finalized successfully');
+    } catch (error) {
+      logger.error('Error finalizing event:', error);
       return errorResponse(res, error.message, 500);
     }
   }
